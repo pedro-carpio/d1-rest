@@ -89,4 +89,43 @@ userRoutes.post('/register', async (c) => {
     }
 });
 
+/**
+ * GET /user/me
+ * Obtiene la información del usuario actual basado en su firebase_uid
+ * Query param: firebase_uid
+ */
+userRoutes.get('/me', async (c) => {
+    try {
+        const firebase_uid = c.req.query('firebase_uid');
+
+        if (!firebase_uid) {
+            return c.json({ 
+                error: 'firebase_uid es requerido como query parameter' 
+            }, 400);
+        }
+
+        const user = await c.env.DB.prepare(
+            `SELECT u.id, u.firebase_uid, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active, u.created_at
+             FROM user_account u
+             JOIN role r ON u.role_id = r.id
+             WHERE u.firebase_uid = ?`
+        ).bind(firebase_uid).first();
+
+        if (!user) {
+            return c.json({ 
+                error: 'Usuario no encontrado' 
+            }, 404);
+        }
+
+        return c.json({ user });
+
+    } catch (error: any) {
+        console.error('Error en /user/me:', error);
+        return c.json({ 
+            error: 'Error al obtener usuario',
+            details: error.message 
+        }, 500);
+    }
+});
+
 export default userRoutes;
