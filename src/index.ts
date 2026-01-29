@@ -1,6 +1,7 @@
 import { Hono, Context, Next } from "hono";
 import { cors } from "hono/cors";
 import { handleRest } from './rest';
+import userRoutes from './routes/user';
 
 export interface Env {
     DB: D1Database;
@@ -61,6 +62,9 @@ export default {
 
         // CRUD REST endpoints made available to all of our tables
         app.all('/rest/*', authMiddleware, handleRest);
+
+        // Custom routes for specific business logic
+        app.route('/user', userRoutes);
 
         // Execute a raw SQL statement with parameters with this route
         app.post('/query', authMiddleware, async (c) => {
