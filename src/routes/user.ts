@@ -6,7 +6,7 @@ import { authenticateUser, authMiddleware, validateFirebaseToken } from '../midd
 const userRoutes = new Hono<{ Bindings: Env }>();
 
 // /user/register y /user/login usan validateFirebaseToken (NO requieren BACKEND_API_TOKEN)
-// /user/me usa authMiddleware + authenticateUser (requiere BACKEND_API_TOKEN + JWT)
+// /user/me usa solo authenticateUser (solo requiere JWT)
 
 /**
  * Genera un JWT firmado con el firebase_uid
@@ -211,9 +211,9 @@ userRoutes.post('/login', validateFirebaseToken, async (c) => {
  * Obtiene la información del usuario actual basado en el JWT
  * NO requiere query params - el firebase_uid se extrae del JWT verificado
  * 
- * REQUIERE: authMiddleware + authenticateUser (BACKEND_API_TOKEN + JWT)
+ * REQUIERE: Solo authenticateUser (JWT es suficiente)
  */
-userRoutes.get('/me', authMiddleware, authenticateUser, async (c) => {
+userRoutes.get('/me', authenticateUser, async (c) => {
     try {
         // El usuario ya fue autenticado por authenticateUser middleware
         const user = c.get('user');
