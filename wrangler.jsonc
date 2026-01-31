@@ -33,7 +33,7 @@
         }
     ],
     "vars": {
-        "FRONTEND_URL": "http://localhost:4200"
+        "FRONTEND_URL": "https://my-tutors-herramientas--my-tutors-herramientas.us-east4.hosted.app"
     },
 	"observability": {
 		"enabled": true

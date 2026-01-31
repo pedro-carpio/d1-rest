@@ -71,27 +71,49 @@ authRoutes.get('/google', async (c) => {
 
 authRoutes.get('/handler', async (c) => {
     try {
+        console.log('🔵 [OAuth Handler] Iniciando callback de Google OAuth');
+        
         const code = c.req.query('code');
         const error = c.req.query('error');
+        const state = c.req.query('state');
+
+        console.log('🔵 [OAuth Handler] Query params recibidos:', {
+            hasCode: !!code,
+            hasError: !!error,
+            hasState: !!state,
+            url: c.req.url
+        });
 
         if (error) {
+            console.error('🔴 [OAuth Handler] Error de Google:', error);
             throw new Error(`Error de Google OAuth: ${error}`);
         }
 
         if (!code) {
+            console.error('🔴 [OAuth Handler] Código de autorización no proporcionado');
             throw new Error('Código de autorización no proporcionado');
         }
 
         const googleClientId = await getGoogleClientId(c.env);
         const googleClientSecret = await getGoogleClientSecret(c.env);
 
+        console.log('🔵 [OAuth Handler] Configuración OAuth:', {
+            hasClientId: !!googleClientId,
+            hasClientSecret: !!googleClientSecret
+        });
+
         if (!googleClientId || !googleClientSecret) {
+            console.error('🔴 [OAuth Handler] Google OAuth no configurado correctamente');
             throw new Error('Google OAuth no configurado correctamente');
         }
 
         const baseUrl = new URL(c.req.url).origin;
         const redirectUri = `${baseUrl}${OAUTH_CONFIG.GOOGLE.CALLBACK_PATH}`;
+        
+        console.log('🔵 [OAuth Handler] Redirect URI:', redirectUri);
 
+        console.log('🔵 [OAuth Handler] Intercambiando código por token...');
+        
         const tokenResponse = await fetch(OAUTH_CONFIG.GOOGLE.TOKEN_URL, {
             method: 'POST',
             headers: {
@@ -106,20 +128,35 @@ authRoutes.get('/handler', async (c) => {
             }),
         });
 
+        console.log('🔵 [OAuth Handler] Respuesta de Google token:', {
+            status: tokenResponse.status,
+            ok: tokenResponse.ok
+        });
+
         if (!tokenResponse.ok) {
             const errorData = await tokenResponse.json();
+            console.error('🔴 [OAuth Handler] Error al obtener token:', errorData);
             throw new Error(`Error al obtener token de Google: ${JSON.stringify(errorData)}`);
         }
 
         const tokenData = await tokenResponse.json() as { access_token: string };
+        console.log('✅ [OAuth Handler] Token de acceso obtenido');
 
+        console.log('🔵 [OAuth Handler] Obteniendo información del usuario de Google...');
+        
         const userinfoResponse = await fetch(OAUTH_CONFIG.GOOGLE.USERINFO_URL, {
             headers: {
                 'Authorization': `Bearer ${tokenData.access_token}`,
             },
         });
 
+        console.log('🔵 [OAuth Handler] Respuesta de userinfo:', {
+            status: userinfoResponse.status,
+            ok: userinfoResponse.ok
+        });
+
         if (!userinfoResponse.ok) {
+            console.error('🔴 [OAuth Handler] Error al obtener información de usuario');
             throw new Error('Error al obtener información de usuario de Google');
         }
 
@@ -130,12 +167,21 @@ authRoutes.get('/handler', async (c) => {
             verified_email?: boolean;
         };
 
+        console.log('🔵 [OAuth Handler] Información del usuario:', {
+            email: userinfo.email,
+            name: userinfo.name,
+            verified: userinfo.verified_email
+        });
+
         if (!userinfo.email) {
+            console.error('🔴 [OAuth Handler] Google no proporcionó email');
             throw new Error('Google no proporcionó un email');
         }
 
         const email = userinfo.email.toLowerCase();
         const fullName = capitalizeName(userinfo.name || '');
+        
+        console.log('🔵 [OAuth Handler] Buscando usuario en BD:', email);
 
         let user = await c.env.DB.prepare(
             `SELECT u.id, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active
@@ -147,6 +193,8 @@ authRoutes.get('/handler', async (c) => {
         let userId: number;
 
         if (!user) {
+            console.log('🔵 [OAuth Handler] Usuario nuevo - creando cuenta');
+            
             const result = await c.env.DB.prepare(
                 `INSERT INTO user_account (email, full_name, role_id, is_active) 
                  VALUES (?, ?, ?, ?)`
@@ -155,6 +203,7 @@ authRoutes.get('/handler', async (c) => {
             .run();
 
             userId = result.meta.last_row_id as number;
+            console.log('✅ [OAuth Handler] Usuario creado con ID:', userId);
 
             user = await c.env.DB.prepare(
                 `SELECT u.id, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active
@@ -163,26 +212,43 @@ authRoutes.get('/handler', async (c) => {
                  WHERE u.id = ?`
             ).bind(userId).first();
         } else {
+            console.log('🔵 [OAuth Handler] Usuario existente encontrado:', {
+                id: user.id,
+                email: user.email,
+                is_active: user.is_active
+            });
+            
             userId = user.id as number;
 
             if (!user.is_active) {
+                console.error('🔴 [OAuth Handler] Usuario inactivo');
                 throw new Error('Usuario inactivo. Contacta al administrador para activar tu cuenta.');
             }
         }
 
+        console.log('🔵 [OAuth Handler] Generando JWT...');
+        
         const secret = await getSecret(c.env);
         if (!secret) {
+            console.error('🔴 [OAuth Handler] Secreto no encontrado');
             throw new Error('Configuración de secreto no encontrada');
         }
 
         const jwt = await generateJWT(userId, secret);
         const refreshToken = generateRefreshToken();
         
+        console.log('✅ [OAuth Handler] Tokens generados:', {
+            jwtLength: jwt.length,
+            refreshTokenLength: refreshToken.length
+        });
+        
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_CONFIG.EXPIRATION_DAYS);
 
         const deviceInfo = c.req.header('User-Agent') || 'Google OAuth';
 
+        console.log('🔵 [OAuth Handler] Guardando refresh token en BD...');
+        
         await c.env.DB.prepare(
             `INSERT INTO refresh_token (user_id, token, expires_at, device_info) 
              VALUES (?, ?, ?, ?)`
@@ -190,19 +256,33 @@ authRoutes.get('/handler', async (c) => {
         .bind(userId, refreshToken, expiresAt.toISOString(), deviceInfo)
         .run();
 
+        console.log('✅ [OAuth Handler] Refresh token guardado');
+
         // Usar FRONTEND_URL configurada
         const frontendBaseUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
-        
-        console.log('🔄 Redirigiendo OAuth a:', frontendBaseUrl);
         
         const frontendUrl = new URL('/auth/callback', frontendBaseUrl);
         frontendUrl.searchParams.set('token', jwt);
         frontendUrl.searchParams.set('refresh_token', refreshToken);
         
-        return c.redirect(frontendUrl.toString());
+        const redirectUrl = frontendUrl.toString();
+        
+        console.log('🟢 [OAuth Handler] Redirigiendo a frontend:', {
+            baseUrl: frontendBaseUrl,
+            path: '/auth/callback',
+            hasToken: true,
+            hasRefreshToken: true,
+            fullUrl: redirectUrl
+        });
+        
+        return c.redirect(redirectUrl);
 
     } catch (error: any) {
-        console.error('Error en /__/auth/handler:', error);
+        console.error('🔴 [OAuth Handler] ERROR CRÍTICO:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name
+        });
         
         // Usar FRONTEND_URL configurada
         const frontendBaseUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
@@ -210,7 +290,12 @@ authRoutes.get('/handler', async (c) => {
         const frontendUrl = new URL('/login', frontendBaseUrl);
         frontendUrl.searchParams.set('error', 'oauth_failed');
         frontendUrl.searchParams.set('message', error.message);
-        return c.redirect(frontendUrl.toString());
+        
+        const errorRedirectUrl = frontendUrl.toString();
+        
+        console.log('🔴 [OAuth Handler] Redirigiendo a error:', errorRedirectUrl);
+        
+        return c.redirect(errorRedirectUrl);
     }
 });
 
