@@ -75,25 +75,18 @@ authRoutes.get('/handler', async (c) => {
         const error = c.req.query('error');
 
         if (error) {
-            return c.json({ 
-                error: 'Error de Google OAuth',
-                details: error 
-            }, 400);
+            throw new Error(`Error de Google OAuth: ${error}`);
         }
 
         if (!code) {
-            return c.json({ 
-                error: 'Código de autorización no proporcionado' 
-            }, 400);
+            throw new Error('Código de autorización no proporcionado');
         }
 
         const googleClientId = await getGoogleClientId(c.env);
         const googleClientSecret = await getGoogleClientSecret(c.env);
 
         if (!googleClientId || !googleClientSecret) {
-            return c.json({ 
-                error: 'Google OAuth no configurado correctamente' 
-            }, 500);
+            throw new Error('Google OAuth no configurado correctamente');
         }
 
         const baseUrl = new URL(c.req.url).origin;
@@ -115,10 +108,7 @@ authRoutes.get('/handler', async (c) => {
 
         if (!tokenResponse.ok) {
             const errorData = await tokenResponse.json();
-            return c.json({ 
-                error: 'Error al obtener token de Google',
-                details: errorData 
-            }, 400);
+            throw new Error(`Error al obtener token de Google: ${JSON.stringify(errorData)}`);
         }
 
         const tokenData = await tokenResponse.json() as { access_token: string };
@@ -130,9 +120,7 @@ authRoutes.get('/handler', async (c) => {
         });
 
         if (!userinfoResponse.ok) {
-            return c.json({ 
-                error: 'Error al obtener información de usuario de Google' 
-            }, 400);
+            throw new Error('Error al obtener información de usuario de Google');
         }
 
         const userinfo = await userinfoResponse.json() as {
@@ -143,9 +131,7 @@ authRoutes.get('/handler', async (c) => {
         };
 
         if (!userinfo.email) {
-            return c.json({ 
-                error: 'Google no proporcionó un email' 
-            }, 400);
+            throw new Error('Google no proporcionó un email');
         }
 
         const email = userinfo.email.toLowerCase();
@@ -180,23 +166,13 @@ authRoutes.get('/handler', async (c) => {
             userId = user.id as number;
 
             if (!user.is_active) {
-                return c.json({ 
-                    error: 'Usuario inactivo. Contacta al administrador para activar tu cuenta.',
-                    user: {
-                        id: user.id,
-                        email: user.email,
-                        full_name: user.full_name,
-                        role_id: user.role_id,
-                        role_name: user.role_name,
-                        is_active: user.is_active
-                    }
-                }, 403);
+                throw new Error('Usuario inactivo. Contacta al administrador para activar tu cuenta.');
             }
         }
 
         const secret = await getSecret(c.env);
         if (!secret) {
-            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+            throw new Error('Configuración de secreto no encontrada');
         }
 
         const jwt = await generateJWT(userId, secret);
