@@ -71,6 +71,31 @@ userRoutes.post('/register', async (c) => {
             }, 400);
         }
 
+        // SEGURIDAD: Si intenta registrarse como admin, debe proporcionar el SECRET
+        const finalRoleId = role_id || USER_DEFAULTS.ROLE_ID;
+        if (finalRoleId === USER_ROLES.ADMIN) {
+            const authHeader = c.req.header('Authorization');
+            const secret = await c.env.SECRET.get();
+            
+            if (!authHeader || !secret) {
+                return c.json({ 
+                    error: 'No autorizado para crear cuentas de administrador',
+                    message: 'Se requiere autenticación con el secreto del backend para crear usuarios admin'
+                }, 401);
+            }
+
+            const providedToken = authHeader.startsWith('Bearer ')
+                ? authHeader.substring(7)
+                : authHeader;
+
+            if (providedToken !== secret) {
+                return c.json({ 
+                    error: 'Credenciales inválidas',
+                    message: 'El secreto proporcionado no es válido'
+                }, 401);
+            }
+        }
+
         // Verificar si el email ya existe
         const existingUser = await c.env.DB.prepare(
             'SELECT id FROM user_account WHERE email = ?'
@@ -85,8 +110,7 @@ userRoutes.post('/register', async (c) => {
         // Hashear la contraseña
         const passwordHash = await hashPassword(password);
 
-        // Verificar que el role_id existe (default: teacher)
-        const finalRoleId = role_id || USER_DEFAULTS.ROLE_ID;
+        // Verificar que el role_id existe
         const roleExists = await c.env.DB.prepare(
             'SELECT id FROM role WHERE id = ?'
         ).bind(finalRoleId).first();
