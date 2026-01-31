@@ -213,27 +213,30 @@ authRoutes.get('/handler', async (c) => {
         .bind(userId, refreshToken, expiresAt.toISOString(), deviceInfo)
         .run();
 
-        return c.json({
-            message: 'Autenticación con Google exitosa',
-            user: {
-                id: user!.id,
-                email: user!.email,
-                full_name: user!.full_name,
-                role_id: user!.role_id,
-                role_name: user!.role_name,
-                is_active: user!.is_active
-            },
-            token: jwt,
-            refresh_token: refreshToken,
-            expires_in: JWT_CONFIG.EXPIRATION
-        });
+        // Detectar el origen del frontend dinámicamente
+        // Si hay Origin header, usarlo; sino usar Referer;
+        const origin = c.req.header('Origin') || c.req.header('Referer')?.split('/').slice(0, 3).join('/');
+        const frontendBaseUrl = origin || 'http://localhost:4200';
+        
+        console.log('🔄 Redirigiendo OAuth a:', frontendBaseUrl);
+        
+        const frontendUrl = new URL('/auth/callback', frontendBaseUrl);
+        frontendUrl.searchParams.set('token', jwt);
+        frontendUrl.searchParams.set('refresh_token', refreshToken);
+        
+        return c.redirect(frontendUrl.toString());
 
     } catch (error: any) {
         console.error('Error en /__/auth/handler:', error);
-        return c.json({ 
-            error: 'Error al procesar autenticación con Google',
-            details: error.message 
-        }, 500);
+        
+        // Detectar el origen del frontend dinámicamente para errores también
+        const origin = c.req.header('Origin') || c.req.header('Referer')?.split('/').slice(0, 3).join('/');
+        const frontendBaseUrl = origin || 'http://localhost:4200';
+        
+        const frontendUrl = new URL('/login', frontendBaseUrl);
+        frontendUrl.searchParams.set('error', 'oauth_failed');
+        frontendUrl.searchParams.set('message', error.message);
+        return c.redirect(frontendUrl.toString());
     }
 });
 
