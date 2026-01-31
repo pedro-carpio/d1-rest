@@ -32,6 +32,9 @@
             "secret_name": "google-client-secret"
         }
     ],
+    "vars": {
+        "FRONTEND_URL": "http://localhost:4200"
+    },
 	"observability": {
 		"enabled": true
 	}

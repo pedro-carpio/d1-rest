@@ -213,10 +213,8 @@ authRoutes.get('/handler', async (c) => {
         .bind(userId, refreshToken, expiresAt.toISOString(), deviceInfo)
         .run();
 
-        // Detectar el origen del frontend dinámicamente
-        // Si hay Origin header, usarlo; sino usar Referer;
-        const origin = c.req.header('Origin') || c.req.header('Referer')?.split('/').slice(0, 3).join('/');
-        const frontendBaseUrl = origin || 'http://localhost:4200';
+        // Usar FRONTEND_URL configurada
+        const frontendBaseUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
         
         console.log('🔄 Redirigiendo OAuth a:', frontendBaseUrl);
         
@@ -229,9 +227,8 @@ authRoutes.get('/handler', async (c) => {
     } catch (error: any) {
         console.error('Error en /__/auth/handler:', error);
         
-        // Detectar el origen del frontend dinámicamente para errores también
-        const origin = c.req.header('Origin') || c.req.header('Referer')?.split('/').slice(0, 3).join('/');
-        const frontendBaseUrl = origin || 'http://localhost:4200';
+        // Usar FRONTEND_URL configurada
+        const frontendBaseUrl = c.env.FRONTEND_URL || 'http://localhost:4200';
         
         const frontendUrl = new URL('/login', frontendBaseUrl);
         frontendUrl.searchParams.set('error', 'oauth_failed');

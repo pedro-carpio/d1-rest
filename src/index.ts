@@ -10,6 +10,7 @@ export interface Env {
     SECRET: SecretsStoreSecret;
     GOOGLE_CLIENT_ID?: SecretsStoreSecret;
     GOOGLE_CLIENT_SECRET?: SecretsStoreSecret;
+    FRONTEND_URL?: string;
 }
 
 // # List all users
