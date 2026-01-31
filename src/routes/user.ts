@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import type { Env } from '../index';
 import { authenticateUser, hashPassword, verifyPassword, requireRoles } from '../middleware/auth';
-import { JWT_CONFIG, PASSWORD_CONFIG, USER_DEFAULTS, USER_ROLES, PASSWORD_RESET_CONFIG } from '../config/constants';
+import { JWT_CONFIG, PASSWORD_CONFIG, USER_DEFAULTS, USER_ROLES, PASSWORD_RESET_CONFIG, REFRESH_TOKEN_CONFIG } from '../config/constants';
 
 const userRoutes = new Hono<{ Bindings: Env }>();
 
@@ -12,7 +12,7 @@ const userRoutes = new Hono<{ Bindings: Env }>();
  * El JWT contiene:
  * - user_id: identificador del usuario
  * - iat: timestamp de emisión
- * - exp: timestamp de expiración (24 horas)
+ * - exp: timestamp de expiración (1 hora)
  * 
  * @param userId - ID del usuario autenticado
  * @param secret - Secreto compartido para firmar el JWT
@@ -28,6 +28,17 @@ async function generateJWT(userId: number, secret: string): Promise<string> {
         .sign(secretKey);
 
     return jwt;
+}
+
+/**
+ * Genera un refresh token aleatorio seguro
+ * @returns Token hexadecimal de 64 caracteres (32 bytes)
+ */
+function generateRefreshToken(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(REFRESH_TOKEN_CONFIG.TOKEN_LENGTH));
+    return Array.from(bytes)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
 }
 
 /**
@@ -71,29 +82,42 @@ userRoutes.post('/register', async (c) => {
             }, 400);
         }
 
-        // SEGURIDAD: Si intenta registrarse como admin, debe proporcionar el SECRET
-        const finalRoleId = role_id || USER_DEFAULTS.ROLE_ID;
-        if (finalRoleId === USER_ROLES.ADMIN) {
-            const authHeader = c.req.header('Authorization');
-            const secret = await c.env.SECRET.get();
-            
-            if (!authHeader || !secret) {
-                return c.json({ 
-                    error: 'No autorizado para crear cuentas de administrador',
-                    message: 'Se requiere autenticación con el secreto del backend para crear usuarios admin'
-                }, 401);
-            }
-
+        // Verificar autenticación con SECRET
+        const authHeader = c.req.header('Authorization');
+        const secret = await c.env.SECRET.get();
+        
+        let isAdminCreating = false;
+        if (authHeader && secret) {
             const providedToken = authHeader.startsWith('Bearer ')
                 ? authHeader.substring(7)
                 : authHeader;
 
-            if (providedToken !== secret) {
-                return c.json({ 
-                    error: 'Credenciales inválidas',
-                    message: 'El secreto proporcionado no es válido'
-                }, 401);
+            if (providedToken === secret) {
+                isAdminCreating = true;
             }
+        }
+
+        // Determinar role_id y is_active según quién crea la cuenta
+        let finalRoleId: number;
+        let isActive: number;
+        
+        if (isAdminCreating) {
+            // Admin creando cuenta: puede elegir cualquier rol y la cuenta está activa
+            finalRoleId = role_id || USER_DEFAULTS.ROLE_ID;
+            isActive = 1; // Activa por defecto
+        } else {
+            // Usuario común registrándose: puede elegir teacher/director/seller (NO admin) e inactiva
+            finalRoleId = role_id || USER_DEFAULTS.ROLE_ID;
+            
+            // SEGURIDAD: Prohibir creación de admins sin SECRET
+            if (finalRoleId === USER_ROLES.ADMIN) {
+                return c.json({ 
+                    error: 'No autorizado para crear cuentas de administrador',
+                    message: 'Solo los administradores pueden crear cuentas con rol admin, que es lo que intentas? ;)'
+                }, 403);
+            }
+            
+            isActive = USER_DEFAULTS.IS_ACTIVE; // Inactiva por defecto
         }
 
         // Verificar si el email ya existe
@@ -131,7 +155,7 @@ userRoutes.post('/register', async (c) => {
             passwordHash,
             full_name || null,
             finalRoleId,
-            USER_DEFAULTS.IS_ACTIVE
+            isActive
         )
         .run();
 
@@ -143,8 +167,12 @@ userRoutes.post('/register', async (c) => {
              WHERE u.id = ?`
         ).bind(result.meta.last_row_id).first();
 
+        const message = isAdminCreating
+            ? 'Usuario registrado y activado exitosamente por administrador.'
+            : 'Usuario registrado exitosamente. Un administrador debe activar tu cuenta.';
+
         return c.json({
-            message: 'Usuario registrado exitosamente. Un administrador debe activar tu cuenta.',
+            message,
             user: {
                 id: newUser!.id,
                 email: newUser!.email,
@@ -238,6 +266,24 @@ userRoutes.post('/login', async (c) => {
         }
         const jwt = await generateJWT(user.id as number, secret);
 
+        // Generar refresh token
+        const refreshToken = generateRefreshToken();
+        
+        // Calcular fecha de expiración del refresh token
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_CONFIG.EXPIRATION_DAYS);
+
+        // Opcional: Capturar información del dispositivo/navegador
+        const deviceInfo = c.req.header('User-Agent') || null;
+
+        // Guardar refresh token en la base de datos
+        await c.env.DB.prepare(
+            `INSERT INTO refresh_token (user_id, token, expires_at, device_info) 
+             VALUES (?, ?, ?, ?)`
+        )
+        .bind(user.id, refreshToken, expiresAt.toISOString(), deviceInfo)
+        .run();
+
         return c.json({
             user: {
                 id: user.id,
@@ -248,13 +294,176 @@ userRoutes.post('/login', async (c) => {
                 is_active: user.is_active,
                 created_at: user.created_at
             },
-            token: jwt
+            token: jwt,
+            refresh_token: refreshToken,
+            expires_in: JWT_CONFIG.EXPIRATION
         });
 
     } catch (error: any) {
         console.error('Error en /user/login:', error);
         return c.json({ 
             error: 'Error al autenticar usuario',
+            details: error.message 
+        }, 500);
+    }
+});
+
+/**
+ * POST /user/refresh-token
+ * Genera un nuevo JWT usando un refresh token válido (endpoint público)
+ * 
+ * Body JSON esperado:
+ * {
+ *   "refresh_token": "string (requerido)"
+ * }
+ * 
+ * Respuesta:
+ * {
+ *   "token": "nuevo_JWT",
+ *   "expires_in": "1h"
+ * }
+ */
+userRoutes.post('/refresh-token', async (c) => {
+    try {
+        const body = await c.req.json();
+        const { refresh_token } = body;
+
+        if (!refresh_token) {
+            return c.json({ 
+                error: 'Refresh token es requerido' 
+            }, 400);
+        }
+
+        // Buscar el refresh token en la base de datos
+        const tokenRecord = await c.env.DB.prepare(
+            `SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked,
+                    u.id as user_id, u.email, u.is_active
+             FROM refresh_token rt
+             JOIN user_account u ON rt.user_id = u.id
+             WHERE rt.token = ?`
+        ).bind(refresh_token).first();
+
+        if (!tokenRecord) {
+            return c.json({ 
+                error: 'Refresh token inválido' 
+            }, 401);
+        }
+
+        // Verificar que el token no haya sido revocado
+        if (tokenRecord.revoked) {
+            return c.json({ 
+                error: 'Este refresh token ha sido revocado' 
+            }, 401);
+        }
+
+        // Verificar que el token no haya expirado
+        const now = new Date();
+        const expiresAt = new Date(tokenRecord.expires_at as string);
+        
+        if (now > expiresAt) {
+            return c.json({ 
+                error: 'El refresh token ha expirado. Por favor, inicia sesión nuevamente.' 
+            }, 401);
+        }
+
+        // Verificar que el usuario siga activo
+        if (!tokenRecord.is_active) {
+            return c.json({ 
+                error: 'Usuario inactivo' 
+            }, 403);
+        }
+
+        // Actualizar last_used_at
+        await c.env.DB.prepare(
+            'UPDATE refresh_token SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ).bind(tokenRecord.id).run();
+
+        // Generar nuevo JWT
+        const secret = await c.env.SECRET.get();
+        if (!secret) {
+            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+        }
+        const newJwt = await generateJWT(tokenRecord.user_id as number, secret);
+
+        return c.json({
+            token: newJwt,
+            expires_in: JWT_CONFIG.EXPIRATION
+        });
+
+    } catch (error: any) {
+        console.error('Error en /user/refresh-token:', error);
+        return c.json({ 
+            error: 'Error al refrescar token',
+            details: error.message 
+        }, 500);
+    }
+});
+
+/**
+ * POST /user/revoke-token
+ * Revoca un refresh token específico (endpoint público)
+ * 
+ * Body JSON esperado:
+ * {
+ *   "refresh_token": "string (requerido)"
+ * }
+ */
+userRoutes.post('/revoke-token', async (c) => {
+    try {
+        const body = await c.req.json();
+        const { refresh_token } = body;
+
+        if (!refresh_token) {
+            return c.json({ 
+                error: 'Refresh token es requerido' 
+            }, 400);
+        }
+
+        // Marcar el token como revocado
+        const result = await c.env.DB.prepare(
+            'UPDATE refresh_token SET revoked = 1 WHERE token = ?'
+        ).bind(refresh_token).run();
+
+        if (result.meta.changes === 0) {
+            return c.json({ 
+                error: 'Refresh token no encontrado' 
+            }, 404);
+        }
+
+        return c.json({
+            message: 'Refresh token revocado exitosamente'
+        });
+
+    } catch (error: any) {
+        console.error('Error en /user/revoke-token:', error);
+        return c.json({ 
+            error: 'Error al revocar token',
+            details: error.message 
+        }, 500);
+    }
+});
+
+/**
+ * DELETE /user/logout-all
+ * Revoca todos los refresh tokens del usuario actual (requiere autenticación)
+ */
+userRoutes.delete('/logout-all', authenticateUser, async (c) => {
+    try {
+        const user = c.get('user');
+
+        // Revocar todos los refresh tokens del usuario
+        await c.env.DB.prepare(
+            'UPDATE refresh_token SET revoked = 1 WHERE user_id = ? AND revoked = 0'
+        ).bind(user.userId).run();
+
+        return c.json({
+            message: 'Todas las sesiones han sido cerradas exitosamente'
+        });
+
+    } catch (error: any) {
+        console.error('Error en /user/logout-all:', error);
+        return c.json({ 
+            error: 'Error al cerrar sesiones',
             details: error.message 
         }, 500);
     }

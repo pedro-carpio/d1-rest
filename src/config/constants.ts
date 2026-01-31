@@ -15,7 +15,13 @@ export const PASSWORD_CONFIG = {
 // Configuración de JWT
 export const JWT_CONFIG = {
     ALGORITHM: 'HS256' as const,
-    EXPIRATION: '24h',
+    EXPIRATION: '1h', // JWT de corta duración (1 hora)
+} as const;
+
+// Configuración de Refresh Tokens
+export const REFRESH_TOKEN_CONFIG = {
+    TOKEN_LENGTH: 32, // bytes
+    EXPIRATION_DAYS: 100, // 100 días
 } as const;
 
 // Roles de usuario (deben coincidir con la tabla role en la BD)
