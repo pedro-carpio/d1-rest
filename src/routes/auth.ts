@@ -68,7 +68,7 @@ authRoutes.get('/google', async (c) => {
     }
 });
 
-authRoutes.get('/__/auth/handler', async (c) => {
+authRoutes.get('/handler', async (c) => {
     try {
         const code = c.req.query('code');
         const error = c.req.query('error');

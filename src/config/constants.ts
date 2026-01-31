@@ -57,7 +57,7 @@ export const OAUTH_CONFIG = {
         TOKEN_URL: 'https://oauth2.googleapis.com/token',
         USERINFO_URL: 'https://www.googleapis.com/oauth2/v2/userinfo',
         SCOPES: ['openid', 'email', 'profile'],
-        CALLBACK_PATH: '/__/auth/handler',
+        CALLBACK_PATH: '/auth/handler',
     },
     STATE_LENGTH: 32, // bytes para el state CSRF token
 } as const;
