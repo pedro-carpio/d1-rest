@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import type { Env } from '../index';
-import { authenticateUser, hashPassword, verifyPassword } from '../middleware/auth';
-import { JWT_CONFIG, PASSWORD_CONFIG, USER_DEFAULTS, USER_ROLES } from '../config/constants';
+import { authenticateUser, hashPassword, verifyPassword, requireRoles } from '../middleware/auth';
+import { JWT_CONFIG, PASSWORD_CONFIG, USER_DEFAULTS, USER_ROLES, PASSWORD_RESET_CONFIG } from '../config/constants';
 
 const userRoutes = new Hono<{ Bindings: Env }>();
 
@@ -28,6 +28,17 @@ async function generateJWT(userId: number, secret: string): Promise<string> {
         .sign(secretKey);
 
     return jwt;
+}
+
+/**
+ * Genera un token aleatorio seguro para reset de contraseña
+ * @returns Token hexadecimal de 64 caracteres (32 bytes)
+ */
+function generateResetToken(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(PASSWORD_RESET_CONFIG.TOKEN_LENGTH));
+    return Array.from(bytes)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
 }
 
 /**
@@ -242,6 +253,200 @@ userRoutes.get('/me', authenticateUser, async (c) => {
                 error: 'Usuario no autenticado' 
             }, 401);
         }
+
+/**
+ * POST /user/admin/generate-reset-token
+ * Genera un token de reset de contraseña para un usuario (solo admin)
+ * 
+ * Body JSON esperado:
+ * {
+ *   "user_id": number (requerido) - ID del usuario al que se le generará el token
+ * }
+ * 
+ * Respuesta:
+ * {
+ *   "reset_token": "abc123...",
+ *   "reset_link": "https://tu-frontend.com/reset-password?token=abc123...",
+ *   "expires_at": "2026-02-01T12:00:00Z",
+ *   "user": { ... }
+ * }
+ */
+userRoutes.post('/admin/generate-reset-token', authenticateUser, requireRoles(['admin']), async (c) => {
+    try {
+        const body = await c.req.json();
+        const { user_id } = body;
+
+        if (!user_id) {
+            return c.json({ 
+                error: 'user_id es requerido' 
+            }, 400);
+        }
+
+        // Verificar que el usuario existe
+        const targetUser = await c.env.DB.prepare(
+            `SELECT u.id, u.email, u.full_name, u.role_id, r.name as role_name 
+             FROM user_account u
+             JOIN role r ON u.role_id = r.id
+             WHERE u.id = ?`
+        ).bind(user_id).first();
+
+        if (!targetUser) {
+            return c.json({ 
+                error: 'Usuario no encontrado' 
+            }, 404);
+        }
+
+        // Invalidar tokens existentes del usuario
+        await c.env.DB.prepare(
+            'UPDATE password_reset_token SET used = 1 WHERE user_id = ? AND used = 0'
+        ).bind(user_id).run();
+
+        // Generar nuevo token
+        const resetToken = generateResetToken();
+        
+        // Calcular fecha de expiración
+        const expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + PASSWORD_RESET_CONFIG.EXPIRATION_HOURS);
+
+        // Guardar token en la base de datos
+        await c.env.DB.prepare(
+            `INSERT INTO password_reset_token (user_id, token, expires_at) 
+             VALUES (?, ?, ?)`
+        )
+        .bind(user_id, resetToken, expiresAt.toISOString())
+        .run();
+
+        return c.json({
+            message: 'Token de reset generado exitosamente',
+            reset_token: resetToken,
+            expires_at: expiresAt.toISOString(),
+            expires_in_hours: PASSWORD_RESET_CONFIG.EXPIRATION_HOURS,
+            user: {
+                id: targetUser.id,
+                email: targetUser.email,
+                full_name: targetUser.full_name,
+                role_id: targetUser.role_id,
+                role_name: targetUser.role_name
+            }
+        }, 201);
+
+    } catch (error: any) {
+        console.error('Error en /user/admin/generate-reset-token:', error);
+        return c.json({ 
+            error: 'Error al generar token de reset',
+            details: error.message 
+        }, 500);
+    }
+});
+
+/**
+ * POST /user/reset-password
+ * Permite al usuario cambiar su contraseña usando un token válido (endpoint público)
+ * 
+ * Body JSON esperado:
+ * {
+ *   "token": "string (requerido) - Token de reset recibido",
+ *   "new_password": "string (requerido, mínimo 6 caracteres)"
+ * }
+ * 
+ * Respuesta:
+ * {
+ *   "message": "Contraseña actualizada exitosamente",
+ *   "user": { ... },
+ *   "token": "JWT para iniciar sesión automáticamente"
+ * }
+ */
+userRoutes.post('/reset-password', async (c) => {
+    try {
+        const body = await c.req.json();
+        const { token, new_password } = body;
+
+        // Validaciones
+        if (!token || !new_password) {
+            return c.json({ 
+                error: 'Token y nueva contraseña son requeridos' 
+            }, 400);
+        }
+
+        if (new_password.length < PASSWORD_CONFIG.MIN_LENGTH) {
+            return c.json({ 
+                error: `La contraseña debe tener al menos ${PASSWORD_CONFIG.MIN_LENGTH} caracteres` 
+            }, 400);
+        }
+
+        // Buscar el token en la base de datos
+        const resetToken = await c.env.DB.prepare(
+            `SELECT rt.id, rt.user_id, rt.expires_at, rt.used,
+                    u.id as user_id, u.email, u.full_name, u.role_id, r.name as role_name
+             FROM password_reset_token rt
+             JOIN user_account u ON rt.user_id = u.id
+             JOIN role r ON u.role_id = r.id
+             WHERE rt.token = ?`
+        ).bind(token).first();
+
+        if (!resetToken) {
+            return c.json({ 
+                error: 'Token de reset inválido' 
+            }, 401);
+        }
+
+        // Verificar que el token no haya sido usado
+        if (resetToken.used) {
+            return c.json({ 
+                error: 'Este token de reset ya fue utilizado' 
+            }, 401);
+        }
+
+        // Verificar que el token no haya expirado
+        const now = new Date();
+        const expiresAt = new Date(resetToken.expires_at as string);
+        
+        if (now > expiresAt) {
+            return c.json({ 
+                error: 'El token de reset ha expirado. Solicita uno nuevo al administrador.' 
+            }, 401);
+        }
+
+        // Hashear la nueva contraseña
+        const newPasswordHash = await hashPassword(new_password);
+
+        // Actualizar la contraseña del usuario
+        await c.env.DB.prepare(
+            'UPDATE user_account SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+        ).bind(newPasswordHash, resetToken.user_id).run();
+
+        // Marcar el token como usado
+        await c.env.DB.prepare(
+            'UPDATE password_reset_token SET used = 1 WHERE id = ?'
+        ).bind(resetToken.id).run();
+
+        // Generar JWT para que el usuario inicie sesión automáticamente
+        const secret = await c.env.SECRET.get();
+        if (!secret) {
+            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+        }
+        const jwt = await generateJWT(resetToken.user_id as number, secret);
+
+        return c.json({
+            message: 'Contraseña actualizada exitosamente',
+            user: {
+                id: resetToken.user_id,
+                email: resetToken.email,
+                full_name: resetToken.full_name,
+                role_id: resetToken.role_id,
+                role_name: resetToken.role_name
+            },
+            token: jwt
+        });
+
+    } catch (error: any) {
+        console.error('Error en /user/reset-password:', error);
+        return c.json({ 
+            error: 'Error al resetear contraseña',
+            details: error.message 
+        }, 500);
+    }
+});
 
         return c.json({ user });
 

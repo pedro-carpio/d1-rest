@@ -37,3 +37,9 @@ export const USER_DEFAULTS = {
     ROLE_ID: USER_ROLES.TEACHER,
     IS_ACTIVE: USER_STATUS.INACTIVE,
 } as const;
+
+// Configuración de tokens de reset de contraseña
+export const PASSWORD_RESET_CONFIG = {
+    TOKEN_LENGTH: 32, // bytes
+    EXPIRATION_HOURS: 24,
+} as const;
