@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { handleRest } from './rest';
 import userRoutes from './routes/user';
 import cursoRoutes from './routes/curso';
+import { authenticateUser } from './middleware/auth';
 
 export interface Env {
     DB: D1Database;
@@ -65,10 +66,14 @@ export default {
         app.all('/rest/*', authMiddleware, handleRest);
 
         // Custom routes for specific business logic
-        // Primero valida BACKEND_API_TOKEN, luego authenticateUser valida X-Firebase-UID
-        app.use('/user/*', authMiddleware);
-        app.use('/curso/*', authMiddleware);
-        app.route('/user', userRoutes);
+        // /user/register y /user/login son públicos (solo requieren BACKEND_API_TOKEN)
+        // /user/me y todos los /curso requieren JWT (authMiddleware + authenticateUser)
+        app.post('/user/register', authMiddleware, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
+        app.post('/user/login', authMiddleware, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
+        app.get('/user/me', authMiddleware, authenticateUser, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
+        
+        // Todas las rutas /curso requieren JWT
+        app.use('/curso/*', authMiddleware, authenticateUser);
         app.route('/curso', cursoRoutes);
 
         // Execute a raw SQL statement with parameters with this route

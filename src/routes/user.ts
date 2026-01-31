@@ -1,7 +1,32 @@
 import { Hono } from 'hono';
+import { SignJWT } from 'jose';
 import type { Env } from '../index';
 
 const userRoutes = new Hono<{ Bindings: Env }>();
+
+/**
+ * Genera un JWT firmado con el firebase_uid
+ * 
+ * El JWT contiene:
+ * - firebase_uid: identificador del usuario
+ * - iat: timestamp de emisión
+ * - exp: timestamp de expiración (1 hora)
+ * 
+ * @param firebaseUid - UID del usuario autenticado de Firebase
+ * @param secret - Secreto compartido para firmar el JWT
+ * @returns JWT firmado
+ */
+async function generateJWT(firebaseUid: string, secret: string): Promise<string> {
+    const secretKey = new TextEncoder().encode(secret);
+
+    const jwt = await new SignJWT({ firebase_uid: firebaseUid })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('1h')
+        .sign(secretKey);
+
+    return jwt;
+}
 
 /**
  * POST /user/register
@@ -75,9 +100,17 @@ userRoutes.post('/register', async (c) => {
             'SELECT id, firebase_uid, email, full_name, role_id, is_active, created_at FROM user_account WHERE id = ?'
         ).bind(result.meta.last_row_id).first();
 
+        // Generar JWT para el usuario registrado
+        const secret = await c.env.SECRET.get();
+        if (!secret) {
+            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+        }
+        const jwt = await generateJWT(firebase_uid, secret);
+
         return c.json({
             message: 'Usuario registrado exitosamente',
-            user: newUser
+            user: newUser,
+            token: jwt
         }, 201);
 
     } catch (error: any) {
@@ -90,20 +123,33 @@ userRoutes.post('/register', async (c) => {
 });
 
 /**
- * GET /user/me
- * Obtiene la información del usuario actual basado en su firebase_uid
- * Query param: firebase_uid
+ * POST /user/login
+ * Autentica un usuario existente y devuelve un JWT
+ * 
+ * Body JSON esperado:
+ * {
+ *   "firebase_uid": "string (requerido)"
+ * }
+ * 
+ * Respuesta:
+ * {
+ *   "user": { ... },
+ *   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+ * }
  */
-userRoutes.get('/me', async (c) => {
+userRoutes.post('/login', async (c) => {
     try {
-        const firebase_uid = c.req.query('firebase_uid');
+        const body = await c.req.json();
+        const { firebase_uid } = body;
 
-        if (!firebase_uid) {
+        // Validaciones
+        if (!firebase_uid || typeof firebase_uid !== 'string') {
             return c.json({ 
-                error: 'firebase_uid es requerido como query parameter' 
+                error: 'firebase_uid es requerido y debe ser un string' 
             }, 400);
         }
 
+        // Buscar el usuario en la base de datos
         const user = await c.env.DB.prepare(
             `SELECT u.id, u.firebase_uid, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active, u.created_at
              FROM user_account u
@@ -115,6 +161,69 @@ userRoutes.get('/me', async (c) => {
             return c.json({ 
                 error: 'Usuario no encontrado' 
             }, 404);
+        }
+
+        if (!user.is_active) {
+            return c.json({ 
+                error: 'Usuario inactivo. Contacta al administrador para activar tu cuenta.',
+                user: {
+                    id: user.id,
+                    firebase_uid: user.firebase_uid,
+                    email: user.email,
+                    full_name: user.full_name,
+                    role_id: user.role_id,
+                    role_name: user.role_name,
+                    is_active: user.is_active
+                }
+            }, 403);
+        }
+
+        // Generar JWT para el usuario
+        const secret = await c.env.SECRET.get();
+        if (!secret) {
+            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+        }
+        const jwt = await generateJWT(firebase_uid, secret);
+
+        return c.json({
+            user: {
+                id: user.id,
+                firebase_uid: user.firebase_uid,
+                email: user.email,
+                full_name: user.full_name,
+                role_id: user.role_id,
+                role_name: user.role_name,
+                is_active: user.is_active,
+                created_at: user.created_at
+            },
+            token: jwt
+        });
+
+    } catch (error: any) {
+        console.error('Error en /user/login:', error);
+        return c.json({ 
+            error: 'Error al autenticar usuario',
+            details: error.message 
+        }, 500);
+    }
+});
+
+/**
+ * GET /user/me
+ * Obtiene la información del usuario actual basado en el JWT
+ * NO requiere query params - el firebase_uid se extrae del JWT verificado
+ * 
+ * REQUIERE: authenticateUser middleware (obtiene firebase_uid del JWT)
+ */
+userRoutes.get('/me', async (c) => {
+    try {
+        // El usuario ya fue autenticado por authenticateUser middleware
+        const user = c.get('user');
+        
+        if (!user) {
+            return c.json({ 
+                error: 'Usuario no autenticado' 
+            }, 401);
         }
 
         return c.json({ user });
