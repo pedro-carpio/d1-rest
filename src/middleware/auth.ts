@@ -287,10 +287,7 @@ export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: 
 };
 
 /**
- * MIDDLEWARE 5: Filtrar Recursos por Usuario
- * 
- * Modifica automáticamente las queries para que solo devuelvan recursos del usuario.
- * Útil para : Filtrar Recursos por Usuario
+ * MIDDLEWARE: Filtrar Recursos por Usuario
  * 
  * Modifica automáticamente las queries para que solo devuelvan recursos del usuario.
  * Útil para GET /curso (solo devolver cursos donde el user es docente)
@@ -299,7 +296,10 @@ export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: 
  * 
  * Uso:
  * app.get('/curso', authenticateUser, injectUserCursoFilter, async (c) => {
- *   const filter = c.get('curso
+ *   const filter = c.get('cursoFilter');
+ *   // Usar filter en la query
+ * })
+ */
 export const injectUserCursoFilter = async (c: Context<{ Bindings: Env }>, next: Next) => {
     const user = c.get('user');
     
