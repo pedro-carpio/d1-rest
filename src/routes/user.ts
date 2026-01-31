@@ -1,8 +1,12 @@
 import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import type { Env } from '../index';
+import { authenticateUser, authMiddleware } from '../middleware/auth';
 
 const userRoutes = new Hono<{ Bindings: Env }>();
+
+// Aplicar authMiddleware a todas las rutas
+userRoutes.use('*', authMiddleware);
 
 /**
  * Genera un JWT firmado con el firebase_uid
@@ -215,7 +219,7 @@ userRoutes.post('/login', async (c) => {
  * 
  * REQUIERE: authenticateUser middleware (obtiene firebase_uid del JWT)
  */
-userRoutes.get('/me', async (c) => {
+userRoutes.get('/me', authenticateUser, async (c) => {
     try {
         // El usuario ya fue autenticado por authenticateUser middleware
         const user = c.get('user');

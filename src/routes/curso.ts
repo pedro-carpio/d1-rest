@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import type { Env } from '../index';
 import { 
-    authenticateUser, 
+    authenticateUser,
+    authMiddleware,
     requireRoles, 
     verifyCursoOwnership,
     injectUserCursoFilter 
@@ -9,13 +10,16 @@ import {
 
 const cursoRoutes = new Hono<{ Bindings: Env }>();
 
+// Aplicar authMiddleware y authenticateUser a todas las rutas de curso
+cursoRoutes.use('*', authMiddleware, authenticateUser);
+
 /**
  * GET /curso
  * Lista cursos según el rol del usuario:
  * - Admin: ve todos los cursos
  * - Teacher: solo ve sus cursos (donde es docente)
  */
-cursoRoutes.get('/', authenticateUser, injectUserCursoFilter, async (c) => {
+cursoRoutes.get('/', injectUserCursoFilter, async (c) => {
     try {
         const filter = c.get('cursoFilter');
         const user = c.get('user');
@@ -53,7 +57,7 @@ cursoRoutes.get('/', authenticateUser, injectUserCursoFilter, async (c) => {
  * - Solo admin y teacher pueden crear cursos
  * - Teachers se auto-asignan como docente
  */
-cursoRoutes.post('/', authenticateUser, requireRoles(['admin', 'teacher']), async (c) => {
+cursoRoutes.post('/', requireRoles(['admin', 'teacher']), async (c) => {
     try {
         const body = await c.req.json();
         const user = c.get('user');
@@ -113,7 +117,7 @@ cursoRoutes.post('/', authenticateUser, requireRoles(['admin', 'teacher']), asyn
  * - Admin: puede editar cualquier curso
  * - Teacher: solo puede editar sus propios cursos
  */
-cursoRoutes.patch('/:id', authenticateUser, verifyCursoOwnership, async (c) => {
+cursoRoutes.patch('/:id', verifyCursoOwnership, async (c) => {
     try {
         const cursoId = c.req.param('id');
         const body = await c.req.json();
@@ -171,7 +175,7 @@ cursoRoutes.patch('/:id', authenticateUser, verifyCursoOwnership, async (c) => {
  * Elimina un curso
  * - Solo admin puede eliminar cursos
  */
-cursoRoutes.delete('/:id', authenticateUser, requireRoles(['admin']), async (c) => {
+cursoRoutes.delete('/:id', requireRoles(['admin']), async (c) => {
     try {
         const cursoId = c.req.param('id');
 

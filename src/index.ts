@@ -1,9 +1,9 @@
-import { Hono, Context, Next } from "hono";
+import { Context, Hono, Next } from "hono";
 import { cors } from "hono/cors";
 import { handleRest } from './rest';
 import userRoutes from './routes/user';
 import cursoRoutes from './routes/curso';
-import { authenticateUser } from './middleware/auth';
+import { authMiddleware } from './middleware/auth';
 
 export interface Env {
     DB: D1Database;
@@ -39,41 +39,15 @@ export default {
             return cors()(c, next);
         })
 
-        // Secret Store key value that we have set
-        const secret = await env.SECRET.get();
-
-        // Authentication middleware that verifies the Authorization header
-        // is sent in on each request and matches the value of our Secret key.
-        // If a match is not found we return a 401 and prevent further access.
-        const authMiddleware = async (c: Context, next: Next) => {
-            const authHeader = c.req.header('Authorization');
-            if (!authHeader) {
-                return c.json({ error: 'Unauthorized' }, 401);
-            }
-
-            const token = authHeader.startsWith('Bearer ')
-                ? authHeader.substring(7)
-                : authHeader;
-
-            if (token !== secret) {
-                return c.json({ error: 'Unauthorized' }, 401);
-            }
-
-            return next();
-        };
-
         // CRUD REST endpoints made available to all of our tables
         app.all('/rest/*', authMiddleware, handleRest);
 
         // Custom routes for specific business logic
-        // /user/register y /user/login son públicos (solo requieren BACKEND_API_TOKEN)
-        // /user/me y todos los /curso requieren JWT (authMiddleware + authenticateUser)
-        app.post('/user/register', authMiddleware, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
-        app.post('/user/login', authMiddleware, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
-        app.get('/user/me', authMiddleware, authenticateUser, async (c, next) => await userRoutes.fetch(c.req.raw, c.env, ctx as any));
+        // Rutas de usuario: /user/register y /user/login son públicos (solo BACKEND_API_TOKEN)
+        // /user/me requiere JWT (authMiddleware + authenticateUser)
+        app.route('/user', userRoutes);
         
-        // Todas las rutas /curso requieren JWT
-        app.use('/curso/*', authMiddleware, authenticateUser);
+        // Todas las rutas /curso requieren JWT (authMiddleware + authenticateUser)
         app.route('/curso', cursoRoutes);
 
         // Execute a raw SQL statement with parameters with this route

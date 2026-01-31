@@ -3,6 +3,34 @@ import { jwtVerify } from 'jose';
 import type { Env } from '../index';
 
 /**
+ * MIDDLEWARE 0: Validación de BACKEND_API_TOKEN
+ * 
+ * Verifica que el header Authorization contenga el token secreto del backend.
+ * Este es el primer nivel de autenticación para todos los endpoints.
+ * 
+ * Uso:
+ * app.use('*', authMiddleware);
+ */
+export const authMiddleware = async (c: Context<{ Bindings: Env }>, next: Next) => {
+    const secret = await c.env.SECRET.get();
+    const authHeader = c.req.header('Authorization');
+    
+    if (!authHeader) {
+        return c.json({ error: 'Unauthorized - No Authorization header' }, 401);
+    }
+
+    const token = authHeader.startsWith('Bearer ')
+        ? authHeader.substring(7)
+        : authHeader;
+
+    if (token !== secret) {
+        return c.json({ error: 'Unauthorized - Invalid token' }, 401);
+    }
+
+    return next();
+};
+
+/**
  * Extiende el contexto de Hono para incluir información del usuario autenticado
  */
 export interface AuthContext {
