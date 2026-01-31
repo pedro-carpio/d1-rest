@@ -9,8 +9,7 @@ import {
 
 const cursoRoutes = new Hono<{ Bindings: Env }>();
 
-// Aplicar solo authenticateUser - JWT del usuario es suficiente
-// NO requiere BACKEND_API_TOKEN (solo para endpoints REST genéricos)
+// Aplicar authenticateUser - JWT del usuario
 cursoRoutes.use('*', authenticateUser);
 
 /**

@@ -3,7 +3,6 @@ import { cors } from "hono/cors";
 import { handleRest } from './rest';
 import userRoutes from './routes/user';
 import cursoRoutes from './routes/curso';
-import { authMiddleware } from './middleware/auth';
 
 export interface Env {
     DB: D1Database;
@@ -39,19 +38,19 @@ export default {
             return cors()(c, next);
         })
 
-        // CRUD REST endpoints made available to all of our tables
-        app.all('/rest/*', authMiddleware, handleRest);
+        // CRUD REST endpoints (públicos - sin autenticación)
+        app.all('/rest/*', handleRest);
 
         // Custom routes for specific business logic
-        // Rutas de usuario: /user/register y /user/login son públicos (solo BACKEND_API_TOKEN)
-        // /user/me requiere JWT (authMiddleware + authenticateUser)
+        // /user/register y /user/login son públicos
+        // /user/me requiere JWT (authenticateUser)
         app.route('/user', userRoutes);
         
-        // Todas las rutas /curso requieren JWT (authMiddleware + authenticateUser)
+        // Todas las rutas /curso requieren JWT (authenticateUser)
         app.route('/curso', cursoRoutes);
 
-        // Execute a raw SQL statement with parameters with this route
-        app.post('/query', authMiddleware, async (c) => {
+        // Execute a raw SQL statement (público - sin autenticación)
+        app.post('/query', async (c) => {
             try {
                 const body = await c.req.json();
                 const { query, params } = body;

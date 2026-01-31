@@ -1,167 +1,117 @@
 import { Context, Next } from 'hono';
-import { jwtVerify, importX509, JWTVerifyResult } from 'jose';
+import { jwtVerify } from 'jose';
 import type { Env } from '../index';
+import { PASSWORD_CONFIG } from '../config/constants';
 
 /**
- * Cache de claves públicas de Firebase para validar ID Tokens
- * Las claves se actualizan cada hora desde Google
+ * Hashea una contraseña usando PBKDF2 (Web Crypto API compatible con Cloudflare Workers)
+ * @param password - Contraseña en texto plano
+ * @returns Hash de la contraseña en formato hexadecimal
  */
-let firebasePublicKeys: Record<string, string> | null = null;
-let keysLastFetched = 0;
-const KEYS_CACHE_DURATION = 3600000; // 1 hora en milisegundos
-
-/**
- * Obtiene las claves públicas de Firebase desde Google
- * https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com
- */
-async function getFirebasePublicKeys(): Promise<Record<string, string>> {
-    const now = Date.now();
+export async function hashPassword(password: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
     
-    // Usar cache si está disponible y no ha expirado
-    if (firebasePublicKeys && (now - keysLastFetched) < KEYS_CACHE_DURATION) {
-        return firebasePublicKeys;
-    }
-
-    // Obtener nuevas claves
-    const response = await fetch(
-        'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+    // Generar salt aleatorio
+    const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_CONFIG.SALT_LENGTH));
+    
+    // Importar la contraseña como clave
+    const key = await crypto.subtle.importKey(
+        'raw',
+        data,
+        { name: 'PBKDF2' },
+        false,
+        ['deriveBits']
     );
-
-    if (!response.ok) {
-        throw new Error('No se pudieron obtener las claves públicas de Firebase');
-    }
-
-    firebasePublicKeys = await response.json();
-    keysLastFetched = now;
     
-    return firebasePublicKeys as Record<string, string>;
+    // Derivar bits usando PBKDF2
+    const hashBuffer = await crypto.subtle.deriveBits(
+        {
+            name: 'PBKDF2',
+            salt: salt,
+            iterations: PASSWORD_CONFIG.PBKDF2_ITERATIONS,
+            hash: PASSWORD_CONFIG.HASH_ALGORITHM
+        },
+        key,
+        PASSWORD_CONFIG.KEY_LENGTH
+    );
+    
+    // Combinar salt + hash
+    const hashArray = new Uint8Array(hashBuffer);
+    const combined = new Uint8Array(salt.length + hashArray.length);
+    combined.set(salt);
+    combined.set(hashArray, salt.length);
+    
+    // Convertir a hexadecimal
+    return Array.from(combined)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
 }
 
 /**
- * MIDDLEWARE -1: Validación de Firebase ID Token
- * 
- * Valida que el Firebase ID Token enviado en el header X-Firebase-ID-Token sea auténtico.
- * Verifica el token usando las claves públicas de Google (sin Firebase Admin SDK).
- * Extrae el uid verificado del token y lo guarda en el contexto.
- * 
- * Este middleware NO requiere BACKEND_API_TOKEN - la validación criptográfica es suficiente.
- * 
- * Uso:
- * app.post('/user/register', validateFirebaseToken, (c) => {
- *   const firebaseUid = c.get('firebaseUid');
- *   // El UID ya está verificado por Google
- * })
+ * Verifica una contraseña contra su hash
+ * @param password - Contraseña en texto plano
+ * @param hash - Hash almacenado en la base de datos
+ * @returns true si la contraseña coincide
  */
-export const validateFirebaseToken = async (c: Context<{ Bindings: Env }>, next: Next) => {
+export async function verifyPassword(password: string, hash: string): Promise<boolean> {
     try {
-        const idToken = c.req.header('X-Firebase-ID-Token');
+        // Convertir hash de hexadecimal a bytes
+        const combined = new Uint8Array(
+            hash.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
+        );
         
-        if (!idToken) {
-            return c.json({ 
-                error: 'No se proporcionó Firebase ID Token',
-                message: 'Debe enviar el token en el header X-Firebase-ID-Token'
-            }, 401);
+        // Extraer salt (primeros 16 bytes)
+        const salt = combined.slice(0, 16);
+        const storedHash = combined.slice(16);
+        
+        const encoder = new TextEncoder();
+        const data = encoder.encode(password);
+        
+        // Importar la contraseña como clave
+        const key = await crypto.subtle.importKey(
+            'raw',
+            data,
+            { name: 'PBKDF2' },
+            false,
+            ['deriveBits']
+        );
+        
+        // Derivar bits usando el mismo salt
+        const hashBuffer = await crypto.subtle.deriveBits(
+            {
+                name: 'PBKDF2',
+                salt: salt,
+                iterations: PASSWORD_CONFIG.PBKDF2_ITERATIONS,
+                hash: PASSWORD_CONFIG.HASH_ALGORITHM
+            },
+            key,
+            PASSWORD_CONFIG.KEY_LENGTH
+        );
+        
+        const hashArray = new Uint8Array(hashBuffer);
+        
+        // Comparar los hashes
+        if (hashArray.length !== storedHash.length) return false;
+        
+        let match = true;
+        for (let i = 0; i < hashArray.length; i++) {
+            if (hashArray[i] !== storedHash[i]) match = false;
         }
-
-        try {
-            // Decodificar el header del token para obtener el kid (key ID)
-            const [headerB64] = idToken.split('.');
-            const headerJson = JSON.parse(atob(headerB64));
-            const kid = headerJson.kid;
-
-            if (!kid) {
-                return c.json({ 
-                    error: 'Token inválido',
-                    message: 'El token no contiene kid (key ID)'
-                }, 401);
-            }
-
-            // Obtener las claves públicas de Firebase
-            const publicKeys = await getFirebasePublicKeys();
-            const publicKeyPem = publicKeys[kid];
-
-            if (!publicKeyPem) {
-                return c.json({ 
-                    error: 'Token inválido',
-                    message: 'No se encontró la clave pública para este token'
-                }, 401);
-            }
-
-            // Importar la clave pública X.509
-            const publicKey = await importX509(publicKeyPem, 'RS256');
-
-            // Verificar el JWT con la clave pública
-            const { payload } = await jwtVerify(idToken, publicKey, {
-                issuer: 'https://securetoken.google.com/my-tutors-herramientas',
-                audience: 'my-tutors-herramientas',
-            }) as JWTVerifyResult;
-
-            // Verificar que el token no ha expirado (exp claim)
-            const now = Math.floor(Date.now() / 1000);
-            if (payload.exp && payload.exp < now) {
-                return c.json({ 
-                    error: 'Token expirado',
-                    message: 'El Firebase ID Token ha expirado'
-                }, 401);
-            }
-
-            // Guardar el UID verificado en el contexto
-            c.set('firebaseUid', payload.sub || payload.user_id as string);
-            c.set('firebaseEmail', (payload.email as string) || null);
-            c.set('firebaseName', (payload.name as string) || null);
-            
-            await next();
-        } catch (verifyError: any) {
-            console.error('Error al verificar Firebase ID Token:', verifyError.message);
-            return c.json({ 
-                error: 'Token de Firebase inválido o expirado',
-                details: verifyError.message
-            }, 401);
-        }
-    } catch (error: any) {
-        console.error('Error en validateFirebaseToken:', error);
-        return c.json({ 
-            error: 'Error al validar autenticación',
-            details: error.message 
-        }, 500);
+        
+        return match;
+    } catch (error) {
+        console.error('Error al verificar contraseña:', error);
+        return false;
     }
-};
-
-/**
- * MIDDLEWARE 0: Validación de BACKEND_API_TOKEN
- * 
- * Verifica que el header Authorization contenga el token secreto del backend.
- * Este es el primer nivel de autenticación para todos los endpoints.
- * 
- * Uso:
- * app.use('*', authMiddleware);
- */
-export const authMiddleware = async (c: Context<{ Bindings: Env }>, next: Next) => {
-    const secret = await c.env.SECRET.get();
-    const authHeader = c.req.header('Authorization');
-    
-    if (!authHeader) {
-        return c.json({ error: 'Unauthorized - No Authorization header' }, 401);
-    }
-
-    const token = authHeader.startsWith('Bearer ')
-        ? authHeader.substring(7)
-        : authHeader;
-
-    if (token !== secret) {
-        return c.json({ error: 'Unauthorized - Invalid token' }, 401);
-    }
-
-    return next();
-};
+}
 
 /**
  * Extiende el contexto de Hono para incluir información del usuario autenticado
  */
 export interface AuthContext {
     userId: number;
-    firebaseUid: string;
-    email: string | null;
+    email: string;
     fullName: string | null;
     roleId: number;
     roleName: string;
@@ -177,19 +127,14 @@ declare module 'hono' {
     interface ContextVariableMap {
         user: AuthContext;
         cursoFilter: CursoFilter;
-        firebaseUid: string;
-        firebaseEmail: string | null;
-        firebaseName: string | null;
     }
 }
 
 /**
- * MIDDLEWARE 1: Autenticación de Usuario con JWT
+ * MIDDLEWARE: Autenticación de Usuario con JWT
  * 
- * Verifica el JWT firmado por el backend y extrae el firebase_uid del payload.
- * El JWT está firmado con el mismo SECRET compartido entre frontend y backend.
- * 
- * Este middleware NO requiere BACKEND_API_TOKEN - el JWT firmado es suficiente.
+ * Verifica el JWT firmado por el backend y extrae el user_id del payload.
+ * El JWT está firmado con el SECRET del backend.
  * 
  * Uso:
  * app.use('/curso/*', authenticateUser);
@@ -198,12 +143,16 @@ declare module 'hono' {
  */
 export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next) => {
     try {
-        // Extraer el JWT del header X-Firebase-Token
-        const jwtToken = c.req.header('X-Firebase-Token');
+        // Extraer el JWT del header Authorization
+        const authHeader = c.req.header('Authorization');
         
-        if (!jwtToken) {
-            return c.json({ error: 'No se proporcionó JWT en header X-Firebase-Token' }, 401);
+        if (!authHeader) {
+            return c.json({ error: 'No se proporcionó token de autenticación' }, 401);
         }
+
+        const jwtToken = authHeader.startsWith('Bearer ')
+            ? authHeader.substring(7)
+            : authHeader;
 
         // Obtener el secreto compartido
         const secret = await c.env.SECRET.get();
@@ -212,15 +161,15 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
         }
 
         // Verificar y decodificar el JWT
-        let firebaseUid: string;
+        let userId: number;
         try {
             const secretKey = new TextEncoder().encode(secret);
             const { payload } = await jwtVerify(jwtToken, secretKey);
             
-            firebaseUid = payload.firebase_uid as string;
+            userId = payload.user_id as number;
             
-            if (!firebaseUid) {
-                return c.json({ error: 'JWT no contiene firebase_uid' }, 401);
+            if (!userId) {
+                return c.json({ error: 'JWT no contiene user_id' }, 401);
             }
         } catch (jwtError: any) {
             console.error('Error al verificar JWT:', jwtError.message);
@@ -229,11 +178,11 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
 
         // Buscar el usuario en la base de datos
         const user = await c.env.DB.prepare(
-            `SELECT u.id, u.firebase_uid, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active
+            `SELECT u.id, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active
              FROM user_account u
              JOIN role r ON u.role_id = r.id
-             WHERE u.firebase_uid = ?`
-        ).bind(firebaseUid).first();
+             WHERE u.id = ?`
+        ).bind(userId).first();
 
         if (!user) {
             return c.json({ error: 'Usuario no encontrado' }, 404);
@@ -246,8 +195,7 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
         // Guardar información del usuario en el contexto
         c.set('user', {
             userId: user.id as number,
-            firebaseUid: user.firebase_uid as string,
-            email: user.email as string | null,
+            email: user.email as string,
             fullName: user.full_name as string | null,
             roleId: user.role_id as number,
             roleName: user.role_name as string,
@@ -265,7 +213,7 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
  * MIDDLEWARE 2: Autorización por Roles (RBAC)
  * 
  * Verifica que el usuario tenga uno de los roles permitidos.
- * DEBE usarse DESPUÉS de authenticateUser.
+ * DEBE usarsDESPUÉS de authenticateUser.
  * 
  * Uso:
  * app.get('/admin/users', authenticateUser, requireRoles(['admin']), (c) => {...})
@@ -295,7 +243,7 @@ export const requireRoles = (allowedRoles: string[]) => {
  * MIDDLEWARE 3: Verificación de Propiedad de Curso
  * 
  * Verifica que el profesor sea dueño del curso antes de permitir operaciones.
- * Útil para endpoints como: PATCH /curso/:id, DELETE /curso/:id
+ * Útil para dpoints como: PATCH /curso/:id, DELETE /curso/:id
  * 
  * Uso:
  * app.patch('/curso/:id', authenticateUser, verifyCursoOwnership, (c) => {...})
@@ -342,16 +290,16 @@ export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: 
  * MIDDLEWARE 5: Filtrar Recursos por Usuario
  * 
  * Modifica automáticamente las queries para que solo devuelvan recursos del usuario.
+ * Útil para : Filtrar Recursos por Usuario
+ * 
+ * Modifica automáticamente las queries para que solo devuelvan recursos del usuario.
  * Útil para GET /curso (solo devolver cursos donde el user es docente)
  * 
  * Este middleware INYECTA el filtro en el contexto para que la ruta lo use.
  * 
  * Uso:
- * app.get('/curso', authenticateUser, injectUserFilter, async (c) => {
- *   const filter = c.get('userFilter');
- *   // Usar filter en la query
- * })
- */
+ * app.get('/curso', authenticateUser, injectUserCursoFilter, async (c) => {
+ *   const filter = c.get('curso
 export const injectUserCursoFilter = async (c: Context<{ Bindings: Env }>, next: Next) => {
     const user = c.get('user');
     
