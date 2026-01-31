@@ -124,9 +124,12 @@ Apply `authMiddleware` to all protected routes.
 ### Middleware Stack Pattern
 All custom routes use a **three-layer auth system** ([middleware/auth.ts](../src/middleware/auth.ts)):
 
-1. **authenticateUser**: Validates Firebase UID from `Authorization` header, loads user data into context
-2. **requireRoles(['admin', 'teacher'])**: RBAC check - filters by role name
-3. **verifyCursoOwnership**: Domain-specific authorization (teachers can only edit their own courses)
+1. **authMiddleware**: Valida `BACKEND_API_TOKEN` en header `Authorization`
+2. **authenticateUser**: Verifica JWT del header `X-Firebase-Token`, extrae `firebase_uid`, carga usuario en contexto
+3. **requireRoles(['admin', 'teacher'])**: RBAC check - filtra por role name
+4. **verifyCursoOwnership**: Autorización específica del dominio (teachers solo editan sus cursos)
+
+**JWT Security**: Frontend firma JWT con `jose.SignJWT()` usando secreto compartido. Backend verifica con `jose.jwtVerify()`. Usuario NO puede falsificar UID porque requiere conocer el secreto.
 
 **Critical**: Always use `authenticateUser` before `requireRoles` or accessing `c.get('user')`.
 

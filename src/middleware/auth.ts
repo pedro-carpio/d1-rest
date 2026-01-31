@@ -1,4 +1,5 @@
 import { Context, Next } from 'hono';
+import { jwtVerify } from 'jose';
 import type { Env } from '../index';
 
 /**
@@ -14,17 +15,23 @@ export interface AuthContext {
     isActive: boolean;
 }
 
+export interface CursoFilter {
+    where: string;
+    params: any[];
+}
+
 declare module 'hono' {
     interface ContextVariableMap {
         user: AuthContext;
+        cursoFilter: CursoFilter;
     }
 }
 
 /**
- * MIDDLEWARE 1: Autenticación de Usuario
+ * MIDDLEWARE 1: Autenticación de Usuario con JWT
  * 
- * Extrae el firebase_uid del header Authorization y carga los datos del usuario en el contexto.
- * Útil cuando el frontend envía el token de Firebase Auth.
+ * Verifica el JWT firmado por el frontend y extrae el firebase_uid del payload.
+ * El JWT está firmado con el mismo SECRET compartido entre frontend y backend.
  * 
  * Uso:
  * app.use('/api/*', authenticateUser);
@@ -33,12 +40,34 @@ declare module 'hono' {
  */
 export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next) => {
     try {
-        // Extraer el firebase_uid del header X-Firebase-UID
+        // Extraer el JWT del header X-Firebase-Token
         // El header Authorization ya fue validado por authMiddleware con BACKEND_API_TOKEN
-        const firebaseUid = c.req.header('X-Firebase-UID');
+        const jwtToken = c.req.header('X-Firebase-Token');
         
-        if (!firebaseUid) {
-            return c.json({ error: 'No se proporcionó firebase_uid en header X-Firebase-UID' }, 401);
+        if (!jwtToken) {
+            return c.json({ error: 'No se proporcionó JWT en header X-Firebase-Token' }, 401);
+        }
+
+        // Obtener el secreto compartido
+        const secret = await c.env.SECRET.get();
+        if (!secret) {
+            return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
+        }
+
+        // Verificar y decodificar el JWT
+        let firebaseUid: string;
+        try {
+            const secretKey = new TextEncoder().encode(secret);
+            const { payload } = await jwtVerify(jwtToken, secretKey);
+            
+            firebaseUid = payload.firebase_uid as string;
+            
+            if (!firebaseUid) {
+                return c.json({ error: 'JWT no contiene firebase_uid' }, 401);
+            }
+        } catch (jwtError: any) {
+            console.error('Error al verificar JWT:', jwtError.message);
+            return c.json({ error: 'JWT inválido o expirado', details: jwtError.message }, 401);
         }
 
         // Buscar el usuario en la base de datos
