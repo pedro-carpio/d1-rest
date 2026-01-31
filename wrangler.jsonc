@@ -7,6 +7,7 @@
 	"name": "d1-rest",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-03-03",
+	"compatibility_flags": ["nodejs_compat"],
     "d1_databases": [
         {
           "binding": "DB",
