@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import type { Env } from '../index';
 import { 
     authenticateUser,
-    authMiddleware,
     requireRoles, 
     verifyCursoOwnership,
     injectUserCursoFilter 
@@ -10,8 +9,9 @@ import {
 
 const cursoRoutes = new Hono<{ Bindings: Env }>();
 
-// Aplicar authMiddleware y authenticateUser a todas las rutas de curso
-cursoRoutes.use('*', authMiddleware, authenticateUser);
+// Aplicar solo authenticateUser - JWT del usuario es suficiente
+// NO requiere BACKEND_API_TOKEN (solo para endpoints REST genéricos)
+cursoRoutes.use('*', authenticateUser);
 
 /**
  * GET /curso

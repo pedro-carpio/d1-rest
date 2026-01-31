@@ -1,37 +1,50 @@
 import { Context, Next } from 'hono';
-import { jwtVerify } from 'jose';
+import { jwtVerify, importX509, JWTVerifyResult } from 'jose';
 import type { Env } from '../index';
-import { initializeApp, cert, getApps, type App } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
 
 /**
- * Configuración de Firebase Admin
- * Se inicializa una sola vez cuando se carga el módulo
+ * Cache de claves públicas de Firebase para validar ID Tokens
+ * Las claves se actualizan cada hora desde Google
  */
-let firebaseApp: App | null = null;
+let firebasePublicKeys: Record<string, string> | null = null;
+let keysLastFetched = 0;
+const KEYS_CACHE_DURATION = 3600000; // 1 hora en milisegundos
 
-function getFirebaseApp(): App {
-    if (!firebaseApp) {
-        if (getApps().length === 0) {
-            // Firebase Admin se auto-configura en Cloudflare Workers
-            // usando Application Default Credentials
-            firebaseApp = initializeApp({
-                projectId: 'my-tutors-herramientas',
-            });
-        } else {
-            firebaseApp = getApps()[0];
-        }
+/**
+ * Obtiene las claves públicas de Firebase desde Google
+ * https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com
+ */
+async function getFirebasePublicKeys(): Promise<Record<string, string>> {
+    const now = Date.now();
+    
+    // Usar cache si está disponible y no ha expirado
+    if (firebasePublicKeys && (now - keysLastFetched) < KEYS_CACHE_DURATION) {
+        return firebasePublicKeys;
     }
-    return firebaseApp;
+
+    // Obtener nuevas claves
+    const response = await fetch(
+        'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com'
+    );
+
+    if (!response.ok) {
+        throw new Error('No se pudieron obtener las claves públicas de Firebase');
+    }
+
+    firebasePublicKeys = await response.json();
+    keysLastFetched = now;
+    
+    return firebasePublicKeys as Record<string, string>;
 }
 
 /**
  * MIDDLEWARE -1: Validación de Firebase ID Token
  * 
  * Valida que el Firebase ID Token enviado en el header X-Firebase-ID-Token sea auténtico.
+ * Verifica el token usando las claves públicas de Google (sin Firebase Admin SDK).
  * Extrae el uid verificado del token y lo guarda en el contexto.
  * 
- * Este middleware NO requiere BACKEND_API_TOKEN - la validación de Firebase es suficiente.
+ * Este middleware NO requiere BACKEND_API_TOKEN - la validación criptográfica es suficiente.
  * 
  * Uso:
  * app.post('/user/register', validateFirebaseToken, (c) => {
@@ -50,24 +63,59 @@ export const validateFirebaseToken = async (c: Context<{ Bindings: Env }>, next:
             }, 401);
         }
 
-        // Validar el token con Firebase Admin
-        const app = getFirebaseApp();
-        const auth = getAuth(app);
-        
         try {
-            const decodedToken = await auth.verifyIdToken(idToken);
-            
+            // Decodificar el header del token para obtener el kid (key ID)
+            const [headerB64] = idToken.split('.');
+            const headerJson = JSON.parse(atob(headerB64));
+            const kid = headerJson.kid;
+
+            if (!kid) {
+                return c.json({ 
+                    error: 'Token inválido',
+                    message: 'El token no contiene kid (key ID)'
+                }, 401);
+            }
+
+            // Obtener las claves públicas de Firebase
+            const publicKeys = await getFirebasePublicKeys();
+            const publicKeyPem = publicKeys[kid];
+
+            if (!publicKeyPem) {
+                return c.json({ 
+                    error: 'Token inválido',
+                    message: 'No se encontró la clave pública para este token'
+                }, 401);
+            }
+
+            // Importar la clave pública X.509
+            const publicKey = await importX509(publicKeyPem, 'RS256');
+
+            // Verificar el JWT con la clave pública
+            const { payload } = await jwtVerify(idToken, publicKey, {
+                issuer: 'https://securetoken.google.com/my-tutors-herramientas',
+                audience: 'my-tutors-herramientas',
+            }) as JWTVerifyResult;
+
+            // Verificar que el token no ha expirado (exp claim)
+            const now = Math.floor(Date.now() / 1000);
+            if (payload.exp && payload.exp < now) {
+                return c.json({ 
+                    error: 'Token expirado',
+                    message: 'El Firebase ID Token ha expirado'
+                }, 401);
+            }
+
             // Guardar el UID verificado en el contexto
-            c.set('firebaseUid', decodedToken.uid);
-            c.set('firebaseEmail', decodedToken.email || null);
-            c.set('firebaseName', decodedToken.name || null);
+            c.set('firebaseUid', payload.sub || payload.user_id as string);
+            c.set('firebaseEmail', (payload.email as string) || null);
+            c.set('firebaseName', (payload.name as string) || null);
             
             await next();
-        } catch (firebaseError: any) {
-            console.error('Error al verificar Firebase ID Token:', firebaseError.message);
+        } catch (verifyError: any) {
+            console.error('Error al verificar Firebase ID Token:', verifyError.message);
             return c.json({ 
                 error: 'Token de Firebase inválido o expirado',
-                details: firebaseError.message
+                details: verifyError.message
             }, 401);
         }
     } catch (error: any) {
@@ -138,18 +186,19 @@ declare module 'hono' {
 /**
  * MIDDLEWARE 1: Autenticación de Usuario con JWT
  * 
- * Verifica el JWT firmado por el frontend y extrae el firebase_uid del payload.
+ * Verifica el JWT firmado por el backend y extrae el firebase_uid del payload.
  * El JWT está firmado con el mismo SECRET compartido entre frontend y backend.
  * 
+ * Este middleware NO requiere BACKEND_API_TOKEN - el JWT firmado es suficiente.
+ * 
  * Uso:
- * app.use('/api/*', authenticateUser);
+ * app.use('/curso/*', authenticateUser);
  * 
  * Luego en las rutas puedes acceder a: c.get('user')
  */
 export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next) => {
     try {
         // Extraer el JWT del header X-Firebase-Token
-        // El header Authorization ya fue validado por authMiddleware con BACKEND_API_TOKEN
         const jwtToken = c.req.header('X-Firebase-Token');
         
         if (!jwtToken) {
