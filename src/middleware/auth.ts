@@ -210,11 +210,11 @@ export const injectUserCursoFilter = async (c: Context<{ Bindings: Env }>, next:
         return c.json({ error: 'Usuario no autenticado' }, 401);
     }
 
-    // Admins ven todos los cursos
-    if (user.roleName === 'admin') {
     if (user.roleName === 'admin') {
         c.set('cursoFilter', { where: '', params: [] });
-    } else {?', 
+    } else {
+        c.set('cursoFilter', { 
+            where: 'WHERE docente_id = ?', 
             params: [user.userId] 
         });
     }

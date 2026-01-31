@@ -49,3 +49,15 @@ export const PASSWORD_RESET_CONFIG = {
     TOKEN_LENGTH: 32, // bytes
     EXPIRATION_HOURS: 24,
 } as const;
+
+// Configuración de OAuth 2.0
+export const OAUTH_CONFIG = {
+    GOOGLE: {
+        AUTHORIZATION_URL: 'https://accounts.google.com/o/oauth2/v2/auth',
+        TOKEN_URL: 'https://oauth2.googleapis.com/token',
+        USERINFO_URL: 'https://www.googleapis.com/oauth2/v2/userinfo',
+        SCOPES: ['openid', 'email', 'profile'],
+        CALLBACK_PATH: '/__/auth/handler',
+    },
+    STATE_LENGTH: 32, // bytes para el state CSRF token
+} as const;

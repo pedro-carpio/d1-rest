@@ -1,13 +1,13 @@
 # Copilot Instructions: Cuaderno Pedagógico Backend
 
 ## Architecture Overview
-Cloudflare Workers backend usando Hono framework y D1 (SQLite) con sistema de autenticación propio.
+Cloudflare Workers backend usando Hono framework y D1 (SQLite) con sistema de autenticación propio (email/password + OAuth 2.0).
 
 - **Entry**: [src/index.ts](../src/index.ts) - Hono app con CORS y rutas
 - **REST Logic**: [src/rest.ts](../src/rest.ts) - CRUD genérico (GET/POST/PATCH/DELETE)
 - **Database**: Cloudflare D1 (SQLite) bound como `env.DB`
-- **Auth**: Sistema propio con PBKDF2, JWT (1h) y refresh tokens (100 días)
-- **Secret**: Cloudflare Secrets Store bound como `env.SECRET` - usado para firmar JWTs y proteger registro de admins
+- **Auth**: Sistema propio con PBKDF2, JWT (1h), refresh tokens (100 días) y OAuth 2.0 (Google)
+- **Secrets**: Cloudflare Secrets Store - `SECRET` (JWT), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 
 ## Domain Model (Sistema Educativo Boliviano)
 
@@ -93,11 +93,18 @@ Example from code comments in [index.ts](../src/index.ts#L12-L25):
 Sistema de autenticación propio documentado en [AUTH.md](../AUTH.md):
 
 **Endpoints públicos:**
-- `POST /user/register` - Registro (inactivo por defecto, activo si usa SECRET)
+- `GET /auth/google` - Inicia OAuth con Google
+- `GET /__/auth/handler` - Callback de Google OAuth (unifica cuentas por email, mantiene ambos métodos)
+- `POST /user/register` - Registro email/password (inactivo por defecto, activo si usa SECRET)
 - `POST /user/login` - Login retorna JWT + refresh_token
 - `POST /user/refresh-token` - Renueva JWT con refresh token
 - `POST /user/revoke-token` - Revoca refresh token (logout dispositivo)
 - `POST /user/reset-password` - Cambia contraseña con token de reset
+
+**Métodos de autenticación:**
+- Usuario con `password_hash` != NULL → puede login con email/password
+- Usuario registrado vía OAuth → puede login con Google
+- Un usuario puede tener **ambos métodos activos simultáneamente**
 
 **Endpoints protegidos (requieren JWT):**
 - `GET /user/me` - Perfil del usuario actual
@@ -107,7 +114,10 @@ Sistema de autenticación propio documentado en [AUTH.md](../AUTH.md):
 **Endpoints genéricos:**
 - `/rest/*` - CRUD genérico (público, sin autenticación)
 - `/curso/*` - Gestión de cursos (requiere JWT)
-- `/query` - SQL queries (público)`DB: D1Database`, `SECRET: SecretsStoreSecret`
+- `/query` - SQL queries (público)
+
+### Bindings
+- `DB: D1Database`, `SECRET: SecretsStoreSecret`, `GOOGLE_CLIENT_ID: SecretsStoreSecret`, `GOOGLE_CLIENT_SECRET: SecretsStoreSecret`
 - Hono context typed as `Context<{ Bindings: Env }>`
 - Access bindings via `c.env.DB` or `env.DB` depending on context
 
@@ -149,10 +159,9 @@ interface AuthContext {
 - `JWT_CONFIG`: Configuración JWT (HS256, 1h expiración)
 - `REFRESH_TOKEN_CONFIG`: Refresh tokens (100 días)
 - `PASSWORD_RESET_CONFIG`: Tokens de reset (24 horas)
+- `OAUTH_CONFIG`: URLs y scopes de Google OAuth 2.0
 - `USER_ROLES`: IDs de roles (1=admin, 2=teacher, 3=director, 4=seller)
 - `USER_DEFAULTS`: Valores por defecto (role=2, inactive=0)
-}
-```
 Access in routes via `const user = c.get('user')` after authenticateUser.
 
 ### Custom Route Pattern ([routes/curso.ts](../src/routes/curso.ts), [routes/user.ts](../src/routes/user.ts))

@@ -1,6 +1,6 @@
 # Sistema de Autenticación
 
-Sistema de autenticación propio con email/password, JWT de corta duración y refresh tokens de larga duración.
+Sistema de autenticación con soporte para email/password y OAuth 2.0 (Google), JWT de corta duración y refresh tokens de larga duración.
 
 ## Arquitectura
 
@@ -10,9 +10,11 @@ Sistema de autenticación propio con email/password, JWT de corta duración y re
 2. **JWT**: Tokens de corta duración (1 hora) firmados con HS256
 3. **Refresh Tokens**: Tokens de larga duración (100 días) para renovar JWTs sin reautenticación
 4. **Password Reset**: Tokens de reset generados por admin (24 horas de validez)
+5. **OAuth 2.0**: Autenticación con Google (unificación de cuentas por email)
 
-### Flujo de Autenticación
+### Flujos de Autenticación
 
+**Email/Password:**
 ```
 Usuario → POST /user/register → Cuenta inactiva → Admin activa → POST /user/login → JWT + Refresh Token
                                                                                             ↓
@@ -21,9 +23,90 @@ Usuario → POST /user/register → Cuenta inactiva → Admin activa → POST /u
                                                                          POST /user/refresh-token → Nuevo JWT
 ```
 
+**Google OAuth 2.0:**
+```
+Usuario → GET /auth/google → Google Authorization → Callback /__/auth/handler → JWT + Refresh Token
+                                                                                            ↓
+                                                    Si email existe: Login automático (MANTIENE password si lo tenía)
+                                                    Si email nuevo: Registro + Login (activo por defecto, sin password)
+```
+
 ## Endpoints
 
-### Públicos (sin autenticación)
+### OAuth 2.0 (Google)
+
+#### `GET /auth/google`
+Inicia el flujo de autenticación con Google OAuth 2.0. Redirige al usuario a la página de login de Google.
+
+**Funcionamiento:**
+1. Usuario hace click en "Sign in with Google"
+2. Frontend redirige a `GET /auth/google`
+3. Backend genera URL de autorización de Google con state CSRF
+4. Usuario es redirigido a Google para autorizar la aplicación
+5. Google redirige a `/__/auth/handler` con código de autorización
+
+**No requiere parámetros** - Simplemente redirige a `https://d1-rest.pedrocarpiom.workers.dev/auth/google`
+
+---
+
+#### `GET /__/auth/handler`
+Callback de Google OAuth 2.0. Procesa el código de autorización y crea/autentica al usuario.
+
+**Funcionamiento:**
+1. Google redirige aquí con `?code=xxx&state=yyy`
+2. Backend intercambia código por access token
+3. Backend obtiene información del usuario de Google (email, nombre)
+4. **Unificación de cuentas**: Busca usuario por email
+   - Si existe: Login automático (actualiza `auth_type` a 'google' si era 'password')
+   - Si no existe: Crea cuenta nueva (teacher, activa inmediatamente)
+5. Genera JWT y refresh token
+6. Retorna credenciales
+
+**Query params:**
+- `code`: Código de autorización de Google (auto-enviado)
+- `state`: Token CSRF para validación (auto-enviado)
+- `error`: Error de Google si el usuario canceló (opcional)
+
+**Respuesta exitosa:**
+```json
+{
+  "message": "Autenticación con Google exitosa",
+  "user": {
+    "id": 1,
+    "email": "usuario@ejemplo.com",
+    "full_name": "Nombre Completo",
+    "role_id": 2,
+    "role_name": "teacher",
+    "is_active": 1
+  },
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "a1b2c3d4e5f6...",
+  "expires_in": "1h"
+}
+```
+
+**Respuesta de error (usuario inactivo):**
+```json
+{
+  "error": "Usuario inactivo. Contacta al administrador para activar tu cuenta.",
+  "user": {
+    "id": 5,
+    "email": "usuario@ejemplo.com",
+    "is_active": 0
+  }
+}
+```
+
+**Notas:**
+- **Unificación de cuentas**: Si el email ya existe, el usuario puede usar AMBOS métodos (password + Google)
+- Si el usuario tenía password, lo conserva y puede seguir usandolo
+- Si el usuario solo tenía Google, puede añadir password después si quiere
+- Nuevas cuentas vía Google se crean activas por defecto (no requieren activación admin)
+- El nombre se formatea con capitalización correcta (María García → María García)
+
+---
+
+### Email/Password
 
 #### `POST /user/register`
 Crea una cuenta nueva.
@@ -263,8 +346,14 @@ Genera un token de reset de contraseña para cualquier usuario.
 - `is_active = 1`: Usuario activo (puede hacer login)
 
 **Regla:**
-- Registro público → `is_active = 0` (requiere activación admin)
+- Registro público (email/password) → `is_active = 0` (requiere activación admin)
 - Registro con SECRET → `is_active = 1` (activo inmediatamente)
+- Registro OAuth (Google) → `is_active = 1` (activo por defecto)
+
+**Métodos de autenticación:**
+- Usuario con `password_hash` != NULL → puede login con email/password
+- Usuario registrado vía OAuth → puede login con Google
+- Usuario puede tener **ambos métodos activos simultáneamente**
 
 ---
 
@@ -296,6 +385,13 @@ Genera un token de reset de contraseña para cualquier usuario.
 - Expiración: 24 horas
 - Uso único: Flag `used = 1` después del reset
 - Generación: Solo admin
+
+### OAuth 2.0
+- Provider: Google (extensible a otros providers)
+- Client ID y Secret: Almacenados en Cloudflare Secrets Store
+- State CSRF: 32 bytes aleatorios para prevenir CSRF
+- Scopes: `openid`, `email`, `profile`
+- Unificación: Si el email ya existe, se unifica la cuenta automáticamente
 - Invalidación: Tokens viejos se marcan como usados al generar uno nuevo
 
 ---
@@ -327,7 +423,24 @@ export const PASSWORD_RESET_CONFIG = {
     TOKEN_LENGTH: 32,
     EXPIRATION_HOURS: 24,
 };
+
+export const OAUTH_CONFIG = {
+    GOOGLE: {
+        AUTHORIZATION_URL: 'https://accounts.google.com/o/oauth2/v2/auth',
+        TOKEN_URL: 'https://oauth2.googleapis.com/token',
+        USERINFO_URL: 'https://www.googleapis.com/oauth2/v2/userinfo',
+        SCOPES: ['openid', 'email', 'profile'],
+        CALLBACK_PATH: '/__/auth/handler',
+    },
+    STATE_LENGTH: 32,
+};
 ```
+
+**Notas sobre OAuth:**
+- Provider: Google (extensible a otros providers)
+- Client ID y Secret: Almacenados en Cloudflare Secrets Store
+- State CSRF: 32 bytes aleatorios para prevenir CSRF
+- Un usuario puede tener password, OAuth, o **ambos métodos simultáneamente**
 
 ---
 
@@ -345,6 +458,10 @@ export const PASSWORD_RESET_CONFIG = {
 ### 0010_refresh_tokens
 - Tabla `refresh_token`
 - Campos: `user_id`, `token`, `expires_at`, `revoked`, `device_info`, `last_used_at`
+
+### 0011_oauth_support
+- Hace `password_hash` NULLABLE (permite usuarios solo con OAuth)
+- Permite que usuarios tengan password, OAuth, o ambos métodos simultáneamente
 
 ---
 

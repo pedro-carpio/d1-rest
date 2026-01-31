@@ -20,6 +20,16 @@
             "store_id": "8c96922bae954621bc48d7340a68e132",
             "binding": "SECRET",
             "secret_name": "my-awesome-tutor"
+        },
+        {
+            "store_id": "8c96922bae954621bc48d7340a68e132",
+            "binding": "GOOGLE_CLIENT_ID",
+            "secret_name": "google-client-id"
+        },
+        {
+            "store_id": "8c96922bae954621bc48d7340a68e132",
+            "binding": "GOOGLE_CLIENT_SECRET",
+            "secret_name": "google-client-secret"
         }
     ],
 	"observability": {

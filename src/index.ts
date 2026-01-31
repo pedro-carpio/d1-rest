@@ -3,10 +3,13 @@ import { cors } from "hono/cors";
 import { handleRest } from './rest';
 import userRoutes from './routes/user';
 import cursoRoutes from './routes/curso';
+import authRoutes from './routes/auth';
 
 export interface Env {
     DB: D1Database;
     SECRET: SecretsStoreSecret;
+    GOOGLE_CLIENT_ID?: SecretsStoreSecret;
+    GOOGLE_CLIENT_SECRET?: SecretsStoreSecret;
 }
 
 // # List all users
@@ -40,6 +43,9 @@ export default {
 
         // CRUD REST endpoints (públicos - sin autenticación)
         app.all('/rest/*', handleRest);
+
+        // OAuth 2.0 routes (Google sign-in)
+        app.route('/auth', authRoutes);
 
         // Custom routes for specific business logic
         // /user/register y /user/login son públicos
