@@ -2,6 +2,7 @@ import { Hono, Context, Next } from "hono";
 import { cors } from "hono/cors";
 import { handleRest } from './rest';
 import userRoutes from './routes/user';
+import cursoRoutes from './routes/curso';
 
 export interface Env {
     DB: D1Database;
@@ -64,7 +65,11 @@ export default {
         app.all('/rest/*', authMiddleware, handleRest);
 
         // Custom routes for specific business logic
+        // Primero valida BACKEND_API_TOKEN, luego authenticateUser valida X-Firebase-UID
+        app.use('/user/*', authMiddleware);
+        app.use('/curso/*', authMiddleware);
         app.route('/user', userRoutes);
+        app.route('/curso', cursoRoutes);
 
         // Execute a raw SQL statement with parameters with this route
         app.post('/query', authMiddleware, async (c) => {
