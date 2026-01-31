@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import type { Env } from '../index';
 import { OAUTH_CONFIG, JWT_CONFIG, USER_DEFAULTS, REFRESH_TOKEN_CONFIG } from '../config/constants';
+import { getSecret, getGoogleClientId, getGoogleClientSecret } from '../utils/secrets';
 
 const authRoutes = new Hono<{ Bindings: Env }>();
 
@@ -35,7 +36,7 @@ function capitalizeName(name: string): string {
 
 authRoutes.get('/google', async (c) => {
     try {
-        const googleClientId = await c.env.GOOGLE_CLIENT_ID?.get();
+        const googleClientId = await getGoogleClientId(c.env);
         
         if (!googleClientId) {
             return c.json({ 
@@ -86,8 +87,8 @@ authRoutes.get('/handler', async (c) => {
             }, 400);
         }
 
-        const googleClientId = await c.env.GOOGLE_CLIENT_ID?.get();
-        const googleClientSecret = await c.env.GOOGLE_CLIENT_SECRET?.get();
+        const googleClientId = await getGoogleClientId(c.env);
+        const googleClientSecret = await getGoogleClientSecret(c.env);
 
         if (!googleClientId || !googleClientSecret) {
             return c.json({ 
@@ -193,7 +194,7 @@ authRoutes.get('/handler', async (c) => {
             }
         }
 
-        const secret = await c.env.SECRET.get();
+        const secret = await getSecret(c.env);
         if (!secret) {
             return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
         }
