@@ -1,6 +1,83 @@
 import { Context, Next } from 'hono';
 import { jwtVerify } from 'jose';
 import type { Env } from '../index';
+import { initializeApp, cert, getApps, type App } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+
+/**
+ * Configuración de Firebase Admin
+ * Se inicializa una sola vez cuando se carga el módulo
+ */
+let firebaseApp: App | null = null;
+
+function getFirebaseApp(): App {
+    if (!firebaseApp) {
+        if (getApps().length === 0) {
+            // Firebase Admin se auto-configura en Cloudflare Workers
+            // usando Application Default Credentials
+            firebaseApp = initializeApp({
+                projectId: 'my-tutors-herramientas',
+            });
+        } else {
+            firebaseApp = getApps()[0];
+        }
+    }
+    return firebaseApp;
+}
+
+/**
+ * MIDDLEWARE -1: Validación de Firebase ID Token
+ * 
+ * Valida que el Firebase ID Token enviado en el header X-Firebase-ID-Token sea auténtico.
+ * Extrae el uid verificado del token y lo guarda en el contexto.
+ * 
+ * Este middleware NO requiere BACKEND_API_TOKEN - la validación de Firebase es suficiente.
+ * 
+ * Uso:
+ * app.post('/user/register', validateFirebaseToken, (c) => {
+ *   const firebaseUid = c.get('firebaseUid');
+ *   // El UID ya está verificado por Google
+ * })
+ */
+export const validateFirebaseToken = async (c: Context<{ Bindings: Env }>, next: Next) => {
+    try {
+        const idToken = c.req.header('X-Firebase-ID-Token');
+        
+        if (!idToken) {
+            return c.json({ 
+                error: 'No se proporcionó Firebase ID Token',
+                message: 'Debe enviar el token en el header X-Firebase-ID-Token'
+            }, 401);
+        }
+
+        // Validar el token con Firebase Admin
+        const app = getFirebaseApp();
+        const auth = getAuth(app);
+        
+        try {
+            const decodedToken = await auth.verifyIdToken(idToken);
+            
+            // Guardar el UID verificado en el contexto
+            c.set('firebaseUid', decodedToken.uid);
+            c.set('firebaseEmail', decodedToken.email || null);
+            c.set('firebaseName', decodedToken.name || null);
+            
+            await next();
+        } catch (firebaseError: any) {
+            console.error('Error al verificar Firebase ID Token:', firebaseError.message);
+            return c.json({ 
+                error: 'Token de Firebase inválido o expirado',
+                details: firebaseError.message
+            }, 401);
+        }
+    } catch (error: any) {
+        console.error('Error en validateFirebaseToken:', error);
+        return c.json({ 
+            error: 'Error al validar autenticación',
+            details: error.message 
+        }, 500);
+    }
+};
 
 /**
  * MIDDLEWARE 0: Validación de BACKEND_API_TOKEN
@@ -52,6 +129,9 @@ declare module 'hono' {
     interface ContextVariableMap {
         user: AuthContext;
         cursoFilter: CursoFilter;
+        firebaseUid: string;
+        firebaseEmail: string | null;
+        firebaseName: string | null;
     }
 }
 

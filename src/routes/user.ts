@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import type { Env } from '../index';
-import { authenticateUser, authMiddleware } from '../middleware/auth';
+import { authenticateUser, authMiddleware, validateFirebaseToken } from '../middleware/auth';
 
 const userRoutes = new Hono<{ Bindings: Env }>();
 
-// Aplicar authMiddleware a todas las rutas
-userRoutes.use('*', authMiddleware);
+// /user/register y /user/login usan validateFirebaseToken (NO requieren BACKEND_API_TOKEN)
+// /user/me usa authMiddleware + authenticateUser (requiere BACKEND_API_TOKEN + JWT)
 
 /**
  * Genera un JWT firmado con el firebase_uid
@@ -36,32 +36,33 @@ async function generateJWT(firebaseUid: string, secret: string): Promise<string>
  * POST /user/register
  * Registra un nuevo usuario en el sistema
  * 
+ * Headers requeridos:
+ *   X-Firebase-ID-Token: Token de autenticación de Firebase
+ * 
  * Body JSON esperado:
  * {
- *   "firebase_uid": "string (requerido)",
  *   "email": "string (opcional)",
  *   "full_name": "string (opcional)",
- *   "role_id": number (requerido, 1=admin, 2=teacher, 3=director, 4=seller),
- *   "is_active": number (opcional, default: 1)
+ *   "role_id": number (opcional, default: 2 - teacher),
+ *   "is_active": number (opcional, default: 0 - inactivo)
  * }
+ * 
+ * El firebase_uid se extrae del token validado, no del body
  */
-userRoutes.post('/register', async (c) => {
+userRoutes.post('/register', validateFirebaseToken, async (c) => {
     try {
-        const body = await c.req.json();
-        const { firebase_uid, email, full_name, role_id, is_active } = body;
-
-        // Validaciones
-        if (!firebase_uid || typeof firebase_uid !== 'string') {
-            return c.json({ 
-                error: 'firebase_uid es requerido y debe ser un string' 
-            }, 400);
-        }
-
-        if (!role_id || typeof role_id !== 'number') {
-            return c.json({ 
-                error: 'role_id es requerido y debe ser un número (1=admin, 2=teacher, 3=director, 4=seller)' 
-            }, 400);
-        }
+        const body = await c.req.json().catch(() => ({}));
+        
+        // Obtener el firebase_uid verificado del contexto (validado por Firebase)
+        const firebase_uid = c.get('firebaseUid');
+        const firebaseEmail = c.get('firebaseEmail');
+        const firebaseName = c.get('firebaseName');
+        
+        // Usar datos del token si no vienen en el body
+        const email = body.email || firebaseEmail;
+        const full_name = body.full_name || firebaseName;
+        const role_id = body.role_id || 2; // teacher por defecto
+        const is_active = body.is_active !== undefined ? body.is_active : 0; // inactivo por defecto
 
         // Verificar si el usuario ya existe
         const existingUser = await c.env.DB.prepare(
@@ -95,7 +96,7 @@ userRoutes.post('/register', async (c) => {
             email || null,
             full_name || null,
             role_id,
-            is_active !== undefined ? is_active : 1
+            is_active
         )
         .run();
 
@@ -130,10 +131,10 @@ userRoutes.post('/register', async (c) => {
  * POST /user/login
  * Autentica un usuario existente y devuelve un JWT
  * 
- * Body JSON esperado:
- * {
- *   "firebase_uid": "string (requerido)"
- * }
+ * Headers requeridos:
+ *   X-Firebase-ID-Token: Token de autenticación de Firebase
+ * 
+ * El firebase_uid se extrae del token validado (no del body)
  * 
  * Respuesta:
  * {
@@ -141,17 +142,10 @@ userRoutes.post('/register', async (c) => {
  *   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
  * }
  */
-userRoutes.post('/login', async (c) => {
+userRoutes.post('/login', validateFirebaseToken, async (c) => {
     try {
-        const body = await c.req.json();
-        const { firebase_uid } = body;
-
-        // Validaciones
-        if (!firebase_uid || typeof firebase_uid !== 'string') {
-            return c.json({ 
-                error: 'firebase_uid es requerido y debe ser un string' 
-            }, 400);
-        }
+        // Obtener el firebase_uid verificado del contexto (validado por Firebase)
+        const firebase_uid = c.get('firebaseUid');
 
         // Buscar el usuario en la base de datos
         const user = await c.env.DB.prepare(
@@ -217,9 +211,9 @@ userRoutes.post('/login', async (c) => {
  * Obtiene la información del usuario actual basado en el JWT
  * NO requiere query params - el firebase_uid se extrae del JWT verificado
  * 
- * REQUIERE: authenticateUser middleware (obtiene firebase_uid del JWT)
+ * REQUIERE: authMiddleware + authenticateUser (BACKEND_API_TOKEN + JWT)
  */
-userRoutes.get('/me', authenticateUser, async (c) => {
+userRoutes.get('/me', authMiddleware, authenticateUser, async (c) => {
     try {
         // El usuario ya fue autenticado por authenticateUser middleware
         const user = c.get('user');
