@@ -3,28 +3,12 @@ import { jwtVerify } from 'jose';
 import type { Env } from '../index';
 import { PASSWORD_CONFIG } from '../config/constants';
 
-/**
- * Hashea una contraseña usando PBKDF2 (Web Crypto API compatible con Cloudflare Workers)
- * @param password - Contraseña en texto plano
- * @returns Hash de la contraseña en formato hexadecimal
- */
 export async function hashPassword(password: string): Promise<string> {
     const encoder = new TextEncoder();
     const data = encoder.encode(password);
-    
-    // Generar salt aleatorio
     const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_CONFIG.SALT_LENGTH));
     
-    // Importar la contraseña como clave
-    const key = await crypto.subtle.importKey(
-        'raw',
-        data,
-        { name: 'PBKDF2' },
-        false,
-        ['deriveBits']
-    );
-    
-    // Derivar bits usando PBKDF2
+    const key = await crypto.subtle.importKey('raw', data, { name: 'PBKDF2' }, false, ['deriveBits']);
     const hashBuffer = await crypto.subtle.deriveBits(
         {
             name: 'PBKDF2',
@@ -36,48 +20,24 @@ export async function hashPassword(password: string): Promise<string> {
         PASSWORD_CONFIG.KEY_LENGTH
     );
     
-    // Combinar salt + hash
     const hashArray = new Uint8Array(hashBuffer);
     const combined = new Uint8Array(salt.length + hashArray.length);
     combined.set(salt);
     combined.set(hashArray, salt.length);
     
-    // Convertir a hexadecimal
-    return Array.from(combined)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    return Array.from(combined).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Verifica una contraseña contra su hash
- * @param password - Contraseña en texto plano
- * @param hash - Hash almacenado en la base de datos
- * @returns true si la contraseña coincide
- */
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
     try {
-        // Convertir hash de hexadecimal a bytes
-        const combined = new Uint8Array(
-            hash.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
-        );
-        
-        // Extraer salt (primeros 16 bytes)
+        const combined = new Uint8Array(hash.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
         const salt = combined.slice(0, 16);
         const storedHash = combined.slice(16);
         
         const encoder = new TextEncoder();
         const data = encoder.encode(password);
+        const key = await crypto.subtle.importKey('raw', data, { name: 'PBKDF2' }, false, ['deriveBits']);
         
-        // Importar la contraseña como clave
-        const key = await crypto.subtle.importKey(
-            'raw',
-            data,
-            { name: 'PBKDF2' },
-            false,
-            ['deriveBits']
-        );
-        
-        // Derivar bits usando el mismo salt
         const hashBuffer = await crypto.subtle.deriveBits(
             {
                 name: 'PBKDF2',
@@ -90,15 +50,12 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
         );
         
         const hashArray = new Uint8Array(hashBuffer);
-        
-        // Comparar los hashes
         if (hashArray.length !== storedHash.length) return false;
         
         let match = true;
         for (let i = 0; i < hashArray.length; i++) {
             if (hashArray[i] !== storedHash[i]) match = false;
         }
-        
         return match;
     } catch (error) {
         console.error('Error al verificar contraseña:', error);
@@ -106,9 +63,6 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
     }
 }
 
-/**
- * Extiende el contexto de Hono para incluir información del usuario autenticado
- */
 export interface AuthContext {
     userId: number;
     email: string;
@@ -130,20 +84,8 @@ declare module 'hono' {
     }
 }
 
-/**
- * MIDDLEWARE: Autenticación de Usuario con JWT
- * 
- * Verifica el JWT firmado por el backend y extrae el user_id del payload.
- * El JWT está firmado con el SECRET del backend.
- * 
- * Uso:
- * app.use('/curso/*', authenticateUser);
- * 
- * Luego en las rutas puedes acceder a: c.get('user')
- */
 export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next) => {
     try {
-        // Extraer el JWT del header Authorization
         const authHeader = c.req.header('Authorization');
         
         if (!authHeader) {
@@ -154,13 +96,11 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
             ? authHeader.substring(7)
             : authHeader;
 
-        // Obtener el secreto compartido
         const secret = await c.env.SECRET.get();
         if (!secret) {
             return c.json({ error: 'Configuración de secreto no encontrada' }, 500);
         }
 
-        // Verificar y decodificar el JWT
         let userId: number;
         try {
             const secretKey = new TextEncoder().encode(secret);
@@ -176,7 +116,6 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
             return c.json({ error: 'JWT inválido o expirado', details: jwtError.message }, 401);
         }
 
-        // Buscar el usuario en la base de datos
         const user = await c.env.DB.prepare(
             `SELECT u.id, u.email, u.full_name, u.role_id, r.name as role_name, u.is_active
              FROM user_account u
@@ -192,7 +131,6 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
             return c.json({ error: 'Usuario inactivo' }, 403);
         }
 
-        // Guardar información del usuario en el contexto
         c.set('user', {
             userId: user.id as number,
             email: user.email as string,
@@ -209,16 +147,6 @@ export const authenticateUser = async (c: Context<{ Bindings: Env }>, next: Next
     }
 };
 
-/**
- * MIDDLEWARE 2: Autorización por Roles (RBAC)
- * 
- * Verifica que el usuario tenga uno de los roles permitidos.
- * DEBE usarsDESPUÉS de authenticateUser.
- * 
- * Uso:
- * app.get('/admin/users', authenticateUser, requireRoles(['admin']), (c) => {...})
- * app.post('/curso', authenticateUser, requireRoles(['admin', 'teacher']), (c) => {...})
- */
 export const requireRoles = (allowedRoles: string[]) => {
     return async (c: Context<{ Bindings: Env }>, next: Next) => {
         const user = c.get('user');
@@ -239,15 +167,6 @@ export const requireRoles = (allowedRoles: string[]) => {
     };
 };
 
-/**
- * MIDDLEWARE 3: Verificación de Propiedad de Curso
- * 
- * Verifica que el profesor sea dueño del curso antes de permitir operaciones.
- * Útil para dpoints como: PATCH /curso/:id, DELETE /curso/:id
- * 
- * Uso:
- * app.patch('/curso/:id', authenticateUser, verifyCursoOwnership, (c) => {...})
- */
 export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: Next) => {
     const user = c.get('user');
     
@@ -255,13 +174,11 @@ export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: 
         return c.json({ error: 'Usuario no autenticado' }, 401);
     }
 
-    // Admins pueden editar cualquier curso
     if (user.roleName === 'admin') {
         await next();
         return;
     }
 
-    // Para teachers, verificar que sean el docente del curso
     const cursoId = c.req.param('id');
     
     if (!cursoId) {
@@ -286,20 +203,6 @@ export const verifyCursoOwnership = async (c: Context<{ Bindings: Env }>, next: 
     await next();
 };
 
-/**
- * MIDDLEWARE: Filtrar Recursos por Usuario
- * 
- * Modifica automáticamente las queries para que solo devuelvan recursos del usuario.
- * Útil para GET /curso (solo devolver cursos donde el user es docente)
- * 
- * Este middleware INYECTA el filtro en el contexto para que la ruta lo use.
- * 
- * Uso:
- * app.get('/curso', authenticateUser, injectUserCursoFilter, async (c) => {
- *   const filter = c.get('cursoFilter');
- *   // Usar filter en la query
- * })
- */
 export const injectUserCursoFilter = async (c: Context<{ Bindings: Env }>, next: Next) => {
     const user = c.get('user');
     
@@ -309,11 +212,9 @@ export const injectUserCursoFilter = async (c: Context<{ Bindings: Env }>, next:
 
     // Admins ven todos los cursos
     if (user.roleName === 'admin') {
+    if (user.roleName === 'admin') {
         c.set('cursoFilter', { where: '', params: [] });
-    } else {
-        // Teachers solo ven sus cursos
-        c.set('cursoFilter', { 
-            where: 'WHERE docente_id = ?', 
+    } else {?', 
             params: [user.userId] 
         });
     }

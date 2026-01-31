@@ -1,28 +1,26 @@
 # Copilot Instructions: Cuaderno Pedagógico Backend
 
 ## Architecture Overview
-This is a **Cloudflare Workers** backend using **Hono** framework and **D1 (SQLite)** database. It provides a generic REST API that auto-generates CRUD endpoints for any table in the database, plus raw SQL query execution.
+Cloudflare Workers backend usando Hono framework y D1 (SQLite) con sistema de autenticación propio.
 
-- **Entry**: [src/index.ts](../src/index.ts) - Hono app with CORS, auth middleware, and route definitions
-- **REST Logic**: [src/rest.ts](../src/rest.ts) - Generic CRUD handlers (GET/POST/PATCH/DELETE)
-- **Database**: Cloudflare D1 (SQLite) bound as `env.DB`
-- **Auth**: Cloudflare Secrets Store bound as `env.SECRET` - validates Bearer token on all API routes
+- **Entry**: [src/index.ts](../src/index.ts) - Hono app con CORS y rutas
+- **REST Logic**: [src/rest.ts](../src/rest.ts) - CRUD genérico (GET/POST/PATCH/DELETE)
+- **Database**: Cloudflare D1 (SQLite) bound como `env.DB`
+- **Auth**: Sistema propio con PBKDF2, JWT (1h) y refresh tokens (100 días)
+- **Secret**: Cloudflare Secrets Store bound como `env.SECRET` - usado para firmar JWTs y proteger registro de admins
 
-## Domain Model (Education Management System)
+## Domain Model (Sistema Educativo Boliviano)
 
-The database schema tracks a Bolivian education system with:
-- **User accounts & roles** (0001): `user_account`, `role` - Teachers, administrators with role-based access
-- **Courses** (0002): `curso` table - grade levels, shifts (morning/afternoon), linked to teachers via `docente_id`
-- **Students & guardians** (0003): `estudiante`, `tutor`, `estudiante_tutor` (many-to-many)
-- **Attendance & incidents** (0004): Daily tracking of student presence and behavioral notes
-- **Observations** (0005): Health observations and general student notes
-- **Pedagogical evaluations** (0007): `evaluacion_actividad`, `evaluacion_trimestral` - tracks "ser/saber/hacer" (be/know/do) dimensions across 4 curricular fields
-- **PDC Planning** (0007): `pdc`, `pdc_fase`, `pdc_fase_perfil` - Curricular development planning with phases and student profiles
+**Tablas principales:**
+- `user_account`, `role` - Cuentas de usuario con roles (admin/teacher/director/seller)
+- `curso` - Cursos escolares vinculados a profesores
+- `estudiante`, `tutor`, `estudiante_tutor` - Estudiantes y tutores
+- `refresh_token`, `password_reset_token` - Gestión de sesiones y recuperación de contraseña
 
-**Key domain concepts**:
-- **Trimestral system**: School year divided into 3 trimesters
-- **Dual shifts**: `turno_manana` (morning), `turno_tarde` (afternoon)
-- **Curricular fields**: COSMOS Y PENSAMIENTO, COMUNIDAD Y SOCIEDAD, VIDA TIERRA Y TERRITORIO, CIENCIA TECNOLOGIA Y PRODUCCION
+**Conceptos clave:**
+- Sistema trimestral (3 trimestres por año)
+- Turnos duales: mañana/tarde
+- Campos curriculares: COSMOS Y PENSAMIENTO, COMUNIDAD Y SOCIEDAD, VIDA TIERRA Y TERRITORIO, CIENCIA TECNOLOGIA Y PRODUCCION
 
 ## Development Workflow
 
@@ -91,13 +89,25 @@ Example from code comments in [index.ts](../src/index.ts#L12-L25):
 ### Authentication Pattern
 **Two-step auth check** in [index.ts](../src/index.ts#L45-L60):
 1. Extract `Authorization` header (supports `Bearer <token>` or raw token)
-2. Compare against `env.SECRET.get()` (Secrets Store binding)
-3. Return 401 if missing or mismatched
+2. Compare against System
+Sistema de autenticación propio documentado en [AUTH.md](../AUTH.md):
 
-Apply `authMiddleware` to all protected routes.
+**Endpoints públicos:**
+- `POST /user/register` - Registro (inactivo por defecto, activo si usa SECRET)
+- `POST /user/login` - Login retorna JWT + refresh_token
+- `POST /user/refresh-token` - Renueva JWT con refresh token
+- `POST /user/revoke-token` - Revoca refresh token (logout dispositivo)
+- `POST /user/reset-password` - Cambia contraseña con token de reset
 
-### TypeScript Types
-- Use `Env` interface for Cloudflare bindings: `DB: D1Database`, `SECRET: SecretsStoreSecret`
+**Endpoints protegidos (requieren JWT):**
+- `GET /user/me` - Perfil del usuario actual
+- `DELETE /user/logout-all` - Cierra todas las sesiones
+- `POST /user/admin/generate-reset-token` - Admin genera token de reset (solo admin)
+
+**Endpoints genéricos:**
+- `/rest/*` - CRUD genérico (público, sin autenticación)
+- `/curso/*` - Gestión de cursos (requiere JWT)
+- `/query` - SQL queries (público)`DB: D1Database`, `SECRET: SecretsStoreSecret`
 - Hono context typed as `Context<{ Bindings: Env }>`
 - Access bindings via `c.env.DB` or `env.DB` depending on context
 
@@ -107,42 +117,40 @@ Apply `authMiddleware` to all protected routes.
 ```jsonc
 {
   "d1_databases": [{
-    "binding": "DB",              // Access as env.DB
-    "database_name": "tutor-tools",
-    "database_id": "ea265f2a-..." // Project-specific
-  }],
-  "secrets_store_secrets": [{
-    "binding": "SECRET",          // Access as env.SECRET
-    "store_id": "8c96922b...",
-    "secret_name": "my-awesome-tutor"
-  }]
-}
-```
+    "benticación y Autorización
 
-## Authentication & Authorization
+Ver documentación completa en [AUTH.md](../AUTH.md).
 
-### Middleware Stack Pattern
-All custom routes use a **three-layer auth system** ([middleware/auth.ts](../src/middleware/auth.ts)):
+### Middleware Stack ([middleware/auth.ts](../src/middleware/auth.ts))
 
-1. **authMiddleware**: Valida `BACKEND_API_TOKEN` en header `Authorization`
-2. **authenticateUser**: Verifica JWT del header `X-Firebase-Token`, extrae `firebase_uid`, carga usuario en contexto
-3. **requireRoles(['admin', 'teacher'])**: RBAC check - filtra por role name
-4. **verifyCursoOwnership**: Autorización específica del dominio (teachers solo editan sus cursos)
+1. **`hashPassword(password)`**: Hashea contraseña con PBKDF2 (100k iteraciones, SHA-256)
+2. **`verifyPassword(password, hash)`**: Verifica contraseña contra hash
+3. **`authenticateUser`**: Extrae JWT del header `Authorization: Bearer {token}`, verifica firma, carga usuario en contexto
+4. **`requireRoles(['admin', 'teacher'])`**: RBAC check - verifica rol del usuario
+5. **`verifyCursoOwnership`**: Teachers solo editan sus propios cursos
+6. **`injectUserCursoFilter`**: Auto-filtra queries (admin ve todo, teacher solo lo suyo)
 
-**JWT Security**: Frontend firma JWT con `jose.SignJWT()` usando secreto compartido. Backend verifica con `jose.jwtVerify()`. Usuario NO puede falsificar UID porque requiere conocer el secreto.
+**Critical**: Siempre usa `authenticateUser` antes de `requireRoles` o acceder a `c.get('user')`.
 
-**Critical**: Always use `authenticateUser` before `requireRoles` or accessing `c.get('user')`.
-
-### Auth Context Type
+### AuthContext Type
 ```typescript
 interface AuthContext {
   userId: number;
-  firebaseUid: string;
-  email: string | null;
+  email: string;
   fullName: string | null;
   roleId: number;
   roleName: string;  // 'admin' | 'teacher' | 'director' | 'seller'
   isActive: boolean;
+}
+```
+
+### Configuración (src/config/constants.ts)
+- `PASSWORD_CONFIG`: Parámetros de hashing (PBKDF2, 100k iteraciones)
+- `JWT_CONFIG`: Configuración JWT (HS256, 1h expiración)
+- `REFRESH_TOKEN_CONFIG`: Refresh tokens (100 días)
+- `PASSWORD_RESET_CONFIG`: Tokens de reset (24 horas)
+- `USER_ROLES`: IDs de roles (1=admin, 2=teacher, 3=director, 4=seller)
+- `USER_DEFAULTS`: Valores por defecto (role=2, inactive=0)
 }
 ```
 Access in routes via `const user = c.get('user')` after authenticateUser.
@@ -167,32 +175,31 @@ Custom routes **extend** generic REST endpoints with:
 ### Adding Custom Routes
 Create new route files in `src/routes/{domain}.ts` when you need:
 1. **Role-based data filtering** (teachers see only their data)
-2. **Multi-table joins** with business logic
-3. **Firebase UID validation** (e.g., user registration)
-4. **Complex authorization** beyond simple RBAC
+2. * archivos en `src/routes/{domain}.ts` cuando necesites:
+1. **Filtrado por rol** (teachers solo ven sus datos)
+2. **Joins complejos** con lógica de negocio
+3. **Autorización compleja** más allá de RBAC simple
 
-Mount routes in [index.ts](../src/index.ts):
+Montar rutas en [index.ts](../src/index.ts):
 ```typescript
 import myRoutes from './routes/my-domain';
 app.route('/my-domain', myRoutes);
 ```
 
-### Testing REST Endpoints
-Use the `/query` endpoint for complex queries:
+### Testing Endpoints
 ```bash
+# Login
+curl -X POST https://d1-rest.<YOUR-ID>.workers.dev/user/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "test@example.com", "password": "password123"}'
+
+# Request autenticado
+curl https://d1-rest.<YOUR-ID>.workers.dev/curso \
+  -H 'Authorization: Bearer {JWT}'
+
+# SQL query directo (público)
 curl -X POST https://d1-rest.<YOUR-ID>.workers.dev/query \
-  -H 'Authorization: Bearer <SECRET>' \
   -H 'Content-Type: application/json' \
   -d '{"query": "SELECT * FROM estudiante WHERE curso_id = ?", "params": [1]}'
 ```
-
-### Testing with Firebase Auth
-Frontend sends Firebase UID as bearer token:
-```bash
-curl -H 'Authorization: Bearer {firebase_uid}' \
-  https://d1-rest.<YOUR-ID>.workers.dev/curso
-```
-Backend validates against `user_account.firebase_uid` column.
-
-### Performance Notes
 According to [README.md](../README.md), this REST API is **~3x faster** than the official D1 API (1,729 vs 574 bytes/sec) due to direct query execution without the overhead of the official API client.

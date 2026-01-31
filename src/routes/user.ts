@@ -6,64 +6,27 @@ import { JWT_CONFIG, PASSWORD_CONFIG, USER_DEFAULTS, USER_ROLES, PASSWORD_RESET_
 
 const userRoutes = new Hono<{ Bindings: Env }>();
 
-/**
- * Genera un JWT firmado con el user_id
- * 
- * El JWT contiene:
- * - user_id: identificador del usuario
- * - iat: timestamp de emisión
- * - exp: timestamp de expiración (1 hora)
- * 
- * @param userId - ID del usuario autenticado
- * @param secret - Secreto compartido para firmar el JWT
- * @returns JWT firmado
- */
 async function generateJWT(userId: number, secret: string): Promise<string> {
     const secretKey = new TextEncoder().encode(secret);
-
     const jwt = await new SignJWT({ user_id: userId })
         .setProtectedHeader({ alg: JWT_CONFIG.ALGORITHM })
         .setIssuedAt()
         .setExpirationTime(JWT_CONFIG.EXPIRATION)
         .sign(secretKey);
-
     return jwt;
 }
 
-/**
- * Genera un refresh token aleatorio seguro
- * @returns Token hexadecimal de 64 caracteres (32 bytes)
- */
 function generateRefreshToken(): string {
     const bytes = crypto.getRandomValues(new Uint8Array(REFRESH_TOKEN_CONFIG.TOKEN_LENGTH));
-    return Array.from(bytes)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Genera un token aleatorio seguro para reset de contraseña
- * @returns Token hexadecimal de 64 caracteres (32 bytes)
- */
 function generateResetToken(): string {
     const bytes = crypto.getRandomValues(new Uint8Array(PASSWORD_RESET_CONFIG.TOKEN_LENGTH));
-    return Array.from(bytes)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * POST /user/register
- * Registra un nuevo usuario en el sistema
- * 
- * Body JSON esperado:
- * {
- *   "email": "string (requerido)",
- *   "password": "string (requerido, mínimo 6 caracteres)",
- *   "full_name": "string (opcional)",
- *   "role_id": number (opcional, default: 2 - teacher)
- * }
- */
+// POST /user/register - Registro público o por admin
 userRoutes.post('/register', async (c) => {
     try {
         const body = await c.req.json();
@@ -193,22 +156,7 @@ userRoutes.post('/register', async (c) => {
     }
 });
 
-/**
- * POST /user/login
- * Autentica un usuario existente y devuelve un JWT
- * 
- * Body JSON esperado:
- * {
- *   "email": "string (requerido)",
- *   "password": "string (requerido)"
- * }
- * 
- * Respuesta:
- * {
- *   "user": { ... },
- *   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
- * }
- */
+// POST /user/login - Autenticación con email/password
 userRoutes.post('/login', async (c) => {
     try {
         const body = await c.req.json();
@@ -308,21 +256,7 @@ userRoutes.post('/login', async (c) => {
     }
 });
 
-/**
- * POST /user/refresh-token
- * Genera un nuevo JWT usando un refresh token válido (endpoint público)
- * 
- * Body JSON esperado:
- * {
- *   "refresh_token": "string (requerido)"
- * }
- * 
- * Respuesta:
- * {
- *   "token": "nuevo_JWT",
- *   "expires_in": "1h"
- * }
- */
+// POST /user/refresh-token - Renovar JWT con refresh token
 userRoutes.post('/refresh-token', async (c) => {
     try {
         const body = await c.req.json();
@@ -399,15 +333,7 @@ userRoutes.post('/refresh-token', async (c) => {
     }
 });
 
-/**
- * POST /user/revoke-token
- * Revoca un refresh token específico (endpoint público)
- * 
- * Body JSON esperado:
- * {
- *   "refresh_token": "string (requerido)"
- * }
- */
+// POST /user/revoke-token - Logout de un dispositivo específico
 userRoutes.post('/revoke-token', async (c) => {
     try {
         const body = await c.req.json();
@@ -443,10 +369,7 @@ userRoutes.post('/revoke-token', async (c) => {
     }
 });
 
-/**
- * DELETE /user/logout-all
- * Revoca todos los refresh tokens del usuario actual (requiere autenticación)
- */
+// DELETE /user/logout-all - Cerrar todas las sesiones (requiere JWT)
 userRoutes.delete('/logout-all', authenticateUser, async (c) => {
     try {
         const user = c.get('user');
@@ -469,13 +392,7 @@ userRoutes.delete('/logout-all', authenticateUser, async (c) => {
     }
 });
 
-/**
- * GET /user/me
- * Obtiene la información del usuario actual basado en el JWT
- * 
- * Headers requeridos:
- *   Authorization: Bearer <JWT>
- */
+// GET /user/me - Perfil del usuario actual (requiere JWT)
 userRoutes.get('/me', authenticateUser, async (c) => {
     try {
         // El usuario ya fue autenticado por authenticateUser middleware
@@ -487,23 +404,7 @@ userRoutes.get('/me', authenticateUser, async (c) => {
             }, 401);
         }
 
-/**
- * POST /user/admin/generate-reset-token
- * Genera un token de reset de contraseña para un usuario (solo admin)
- * 
- * Body JSON esperado:
- * {
- *   "user_id": number (requerido) - ID del usuario al que se le generará el token
- * }
- * 
- * Respuesta:
- * {
- *   "reset_token": "abc123...",
- *   "reset_link": "https://tu-frontend.com/reset-password?token=abc123...",
- *   "expires_at": "2026-02-01T12:00:00Z",
- *   "user": { ... }
- * }
- */
+// POST /user/admin/generate-reset-token - Admin genera token de reset (solo admin)
 userRoutes.post('/admin/generate-reset-token', authenticateUser, requireRoles(['admin']), async (c) => {
     try {
         const body = await c.req.json();
@@ -572,23 +473,7 @@ userRoutes.post('/admin/generate-reset-token', authenticateUser, requireRoles(['
     }
 });
 
-/**
- * POST /user/reset-password
- * Permite al usuario cambiar su contraseña usando un token válido (endpoint público)
- * 
- * Body JSON esperado:
- * {
- *   "token": "string (requerido) - Token de reset recibido",
- *   "new_password": "string (requerido, mínimo 6 caracteres)"
- * }
- * 
- * Respuesta:
- * {
- *   "message": "Contraseña actualizada exitosamente",
- *   "user": { ... },
- *   "token": "JWT para iniciar sesión automáticamente"
- * }
- */
+// POST /user/reset-password - Cambiar contraseña con token de reset
 userRoutes.post('/reset-password', async (c) => {
     try {
         const body = await c.req.json();
